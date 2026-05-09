@@ -285,7 +285,10 @@ def parse_datagram(data: bytes) -> Optional[dict]:
     # 1. ForeFlight XGPS / XATT (text, starts with 'X')
     if data[:1] == b"X":
         try:
-            text = data.decode("ascii", errors="ignore")
+            # MSFS Bridge null-terminates each datagram. Python's float()
+            # ignores whitespace but NOT NUL bytes, so we strip them here
+            # otherwise the last numeric field fails to parse.
+            text = data.decode("ascii", errors="ignore").replace("\x00", "")
         except Exception:
             text = ""
         if text:
@@ -314,7 +317,7 @@ def parse_datagram(data: bytes) -> Optional[dict]:
 
     # 3. NMEA (text $GP...)
     try:
-        text = data.decode("ascii", errors="ignore")
+        text = data.decode("ascii", errors="ignore").replace("\x00", "")
     except Exception:
         return None
     latest = None
