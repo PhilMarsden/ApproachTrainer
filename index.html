@@ -462,6 +462,7 @@
     <div class="seg" id="srcSeg">
       <button data-v="gps" class="on">Device GPS</button>
       <button data-v="bridge">MSFS Bridge</button>
+      <button data-v="manual">Manual</button>
     </div>
     <div class="field" id="f-bridge" style="display:none">
       <label>WebSocket URL</label>
@@ -700,6 +701,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.10.0 Manual location source — fully simulated position advances at manualGsKt
      0.9.0  Drop ±25 ft nudges; VS readout shows current + target in all modes
      0.8.0  Manual mode adds ±10 kt and ±100 fpm controls (persistent; FPM integrates)
      0.7.2  Hide Next Step / Step Δ before FAF — only relevant once descending
@@ -715,7 +717,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.9.0';
+const APP_VERSION = 'v0.10.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1236,6 +1238,10 @@ function beginSimulation(cfg) {
     if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
     Sim.watchId = null;
     if (Sim._bridgeWs) { try { Sim._bridgeWs.close(); } catch(e){} Sim._bridgeWs = null; }
+    if (Sim._manualSimInterval) {
+      clearInterval(Sim._manualSimInterval);
+      Sim._manualSimInterval = null;
+    }
   };
   const sourceLabel = (locSource === 'bridge') ? 'MSFS Bridge' : 'GPS';
   const timeoutId = setTimeout(() => {
@@ -1291,7 +1297,7 @@ function beginSimulation(cfg) {
       onError,
       { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
     );
-  } else {
+  } else if (locSource === 'bridge') {
     // MSFS Bridge: WebSocket → JSON {lat, lon, alt_ft?, alt_m?, hdg?, gs_kt?, accuracy?}
     goBtn.textContent = 'Connecting bridge…';
     let ws;
@@ -1328,6 +1334,65 @@ function beginSimulation(cfg) {
       };
       if (!acquired) onFirst(pos); else onUpdate(pos);
     });
+  } else if (locSource === 'manual') {
+    // Manual source — fully simulated. Position advances along the course at
+    // manualGsKt × dt; altitude evolves from manualFpm (if vMode='manual') or
+    // follows the path (if vMode='auto'). No external feed required.
+    goBtn.textContent = 'Starting…';
+    if (Sim.manualGsKt === null) Sim.manualGsKt = 90;
+
+    const startManualFromAnchor = (anchorLat, anchorLon) => {
+      if (acquired) return;
+      // First synthetic fix → triggers onFirst → finalizeStartup.
+      const firstFix = {
+        coords: {
+          latitude: anchorLat, longitude: anchorLon,
+          altitude: null, accuracy: 1, altitudeAccuracy: 1,
+          heading: cfg.course || 0,
+          speed: (Sim.manualGsKt || 0) * 0.514444,
+        },
+        timestamp: Date.now(),
+      };
+      onFirst(firstFix);
+      // Advance position at manualGsKt along the configured course on a tick.
+      Sim._manualAlongM = 0;
+      Sim._manualSimLast = performance.now();
+      Sim._manualSimInterval = setInterval(() => {
+        if (Sim.paused || Sim.ended) {
+          Sim._manualSimLast = performance.now();
+          return;
+        }
+        const now = performance.now();
+        const dt = Math.min(1, (now - Sim._manualSimLast) / 1000);
+        Sim._manualSimLast = now;
+        const speedMs = Math.max(0, (Sim.manualGsKt || 0) * 0.514444);
+        Sim._manualAlongM += speedMs * dt;
+        const newPos = destinationPoint(
+          Sim.lat0, Sim.lon0, Sim.course, Sim._manualAlongM
+        );
+        onUpdate({
+          coords: {
+            latitude: newPos.lat, longitude: newPos.lon,
+            altitude: null, accuracy: 1, altitudeAccuracy: 1,
+            heading: Sim.course, speed: speedMs,
+          },
+          timestamp: Date.now(),
+        });
+      }, 200);
+    };
+
+    // Try to use device GPS for the anchor lat/lon (so the displayed coords
+    // are local-ish), but the values are arbitrary — only relative motion
+    // matters. Fall back to a default after a short wait.
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => startManualFromAnchor(pos.coords.latitude, pos.coords.longitude),
+        () => startManualFromAnchor(51.5, 0.0),
+        { enableHighAccuracy: false, timeout: 2000, maximumAge: 60000 }
+      );
+    } else {
+      setTimeout(() => startManualFromAnchor(51.5, 0.0), 50);
+    }
   }
 }
 
@@ -1362,6 +1427,17 @@ function configureSimUI() {
   const c = Sim.cfg;
   const modeText = (c.apprType === 'ILS') ? 'ILS' : 'RNP LNAV';
   const advText  = (c.apprType === 'LNAV') ? 'ADV' : '';
+
+  // Manual flight controls: always shown when the source is Manual (the
+  // pilot is hand-flying the simulation), or when vMode is Manual (altitude
+  // override on top of GPS/Bridge).
+  const manualCtrls = (Sim.locSource === 'manual') || (vMode === 'manual');
+  $('speedRow').classList.toggle('show', manualCtrls);
+  $('vsRow').classList.toggle('show', manualCtrls);
+  if (Sim.locSource === 'manual' && Sim.manualGsKt === null) {
+    Sim.manualGsKt = 90;
+  }
+  updateManualReadouts();
   $('modeTag').textContent = modeText;
   $('cdiModeLbl').textContent = modeText;
   $('cdiAdvLbl').textContent = advText;
@@ -1741,11 +1817,16 @@ function updateManualReadouts() {
 
 bindSeg($('vModeSeg'), v => {
   vMode = v;
-  const isManual = v === 'manual';
-  $('speedRow').classList.toggle('show', isManual);
-  $('vsRow').classList.toggle('show', isManual);
-  if (!isManual) {
-    // Leaving manual — clear all manual state.
+  const isManualVMode = v === 'manual';
+  // Speed/FPM rows are visible whenever any manual flying is happening —
+  // either the user is fully simulating (source=manual), or just overriding
+  // altitude on top of GPS/Bridge (vMode=manual).
+  const isManualSource = (Sim.locSource === 'manual');
+  const showCtrls = isManualVMode || isManualSource;
+  $('speedRow').classList.toggle('show', showCtrls);
+  $('vsRow').classList.toggle('show', showCtrls);
+  if (!isManualVMode && !isManualSource) {
+    // Leaving manual — clear manual state.
     Sim.manualGsKt = null;
     Sim.manualFpm = 0;
     Sim.manualVsOffset = 0;
@@ -1806,6 +1887,7 @@ function resetToSetup() {
   if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
   Sim.watchId = null;
   if (Sim._bridgeWs) { try { Sim._bridgeWs.close(); } catch(e){} Sim._bridgeWs = null; }
+  if (Sim._manualSimInterval) { clearInterval(Sim._manualSimInterval); Sim._manualSimInterval = null; }
   if (Sim.rafId) cancelAnimationFrame(Sim.rafId);
   Sim.rafId = null;
   releaseWakeLock();
