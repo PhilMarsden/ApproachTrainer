@@ -417,6 +417,19 @@
   <div class="disclaimer">Training simulation only. Not for navigation.</div>
 
   <div class="group">
+    <div class="glabel">Location Source</div>
+    <div class="seg" id="srcSeg">
+      <button data-v="gps" class="on">Device GPS</button>
+      <button data-v="bridge">MSFS Bridge</button>
+    </div>
+    <div class="field" id="f-bridge" style="display:none">
+      <label>WebSocket URL</label>
+      <input type="text" id="bridgeUrl" value="ws://127.0.0.1:9090" placeholder="ws://host:port" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false">
+      <div class="hint">Run <code>msfs-bridge-relay.py</code> on the PC running MSFS Bridge</div>
+    </div>
+  </div>
+
+  <div class="group">
     <div class="glabel">Approach Type</div>
     <div class="seg" id="apprTypeSeg">
       <button data-v="ILS" class="on">ILS</button>
@@ -698,6 +711,12 @@ function bindSeg(seg, cb) {
 
 let apprType = 'ILS';        // 'ILS' | 'LNAV'
 let lnavMode = 'LAT';        // 'LAT' | 'LNAVV'
+let locSource = 'gps';       // 'gps' | 'bridge'
+
+bindSeg($('srcSeg'), v => {
+  locSource = v;
+  $('f-bridge').style.display = (v === 'bridge') ? '' : 'none';
+});
 
 bindSeg($('apprTypeSeg'), v => {
   apprType = v;
@@ -873,10 +892,12 @@ function beginSimulation(cfg) {
   Sim.manualOffset = 0;
   Sim.manualDecayLast = null;
 
-  if (!('geolocation' in navigator)) {
+  if (locSource === 'gps' && !('geolocation' in navigator)) {
     showError('GPS is not available in this browser.');
     return;
   }
+  Sim.locSource = locSource;
+  Sim.bridgeUrl = ($('bridgeUrl').value || '').trim() || 'ws://127.0.0.1:9090';
 
   // Request iOS permission for orientation if available — best effort.
   if (typeof DeviceOrientationEvent !== 'undefined' &&
@@ -889,14 +910,19 @@ function beginSimulation(cfg) {
   goBtn.textContent = 'Acquiring GPS…';
 
   let acquired = false;
-  const timeoutId = setTimeout(() => {
-    if (acquired) return;
+  const stopSource = () => {
     if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
     Sim.watchId = null;
+    if (Sim._bridgeWs) { try { Sim._bridgeWs.close(); } catch(e){} Sim._bridgeWs = null; }
+  };
+  const sourceLabel = (locSource === 'bridge') ? 'MSFS Bridge' : 'GPS';
+  const timeoutId = setTimeout(() => {
+    if (acquired) return;
+    stopSource();
     goBtn.disabled = false;
     goBtn.classList.remove('loading');
     goBtn.textContent = 'GO';
-    showError(`No GPS fix within 10 s. <br>
+    showError(`No ${sourceLabel} fix within 10 s. <br>
       <button onclick="document.getElementById('setupError').classList.remove('show')">Try again</button>`);
   }, 10000);
 
@@ -923,27 +949,64 @@ function beginSimulation(cfg) {
   const onError = (err) => {
     if (acquired) return; // running watch handles errors otherwise
     clearTimeout(timeoutId);
-    if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
-    Sim.watchId = null;
+    stopSource();
     goBtn.disabled = false;
     goBtn.classList.remove('loading');
     goBtn.textContent = 'GO';
-    let msg = 'GPS error.';
+    let msg = `${sourceLabel} error.`;
     if (err.code === 1) msg = 'GPS permission denied.';
     else if (err.code === 2) msg = 'GPS position unavailable.';
     else if (err.code === 3) msg = 'GPS request timed out.';
+    else if (err.code === 99) msg = err.message || 'MSFS Bridge connection failed.';
     showError(`${msg} <br>
       <button onclick="document.getElementById('setupError').classList.remove('show')">Try again</button>`);
   };
 
-  Sim.watchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      if (!acquired) onFirst(pos);
-      else onUpdate(pos);
-    },
-    onError,
-    { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
-  );
+  if (locSource === 'gps') {
+    goBtn.textContent = 'Acquiring GPS…';
+    Sim.watchId = navigator.geolocation.watchPosition(
+      (pos) => { if (!acquired) onFirst(pos); else onUpdate(pos); },
+      onError,
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+    );
+  } else {
+    // MSFS Bridge: WebSocket → JSON {lat, lon, alt_ft?, alt_m?, hdg?, gs_kt?, accuracy?}
+    goBtn.textContent = 'Connecting bridge…';
+    let ws;
+    try { ws = new WebSocket(Sim.bridgeUrl); }
+    catch (e) { onError({ code: 99, message: 'Bad WebSocket URL' }); return; }
+    Sim._bridgeWs = ws;
+    ws.addEventListener('error', () => onError({ code: 99, message: `Bridge connect failed (${Sim.bridgeUrl})` }));
+    ws.addEventListener('close', () => {
+      if (acquired) {
+        // post-acquire disconnect — flag it but keep last data on screen
+        const lab = $('gpsTag');
+        lab.textContent = 'BRIDGE LOST';
+        lab.classList.add('warn');
+      }
+    });
+    ws.addEventListener('message', (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (typeof m.lat !== 'number' || typeof m.lon !== 'number') return;
+      const altM = (typeof m.alt_ft === 'number') ? (m.alt_ft / FT_PER_M)
+                 : (typeof m.alt_m  === 'number') ? m.alt_m
+                 : null;
+      const pos = {
+        coords: {
+          latitude: m.lat,
+          longitude: m.lon,
+          altitude: altM,
+          accuracy: (typeof m.accuracy === 'number') ? m.accuracy : 5,
+          altitudeAccuracy: 8,
+          heading: (typeof m.hdg === 'number') ? m.hdg : null,
+          speed:   (typeof m.gs_kt === 'number') ? m.gs_kt * 0.514444 : null,
+        },
+        timestamp: Date.now()
+      };
+      if (!acquired) onFirst(pos); else onUpdate(pos);
+    });
+  }
 }
 
 function finalizeStartup() {
@@ -1184,13 +1247,15 @@ function render() {
   $('rCurAltSub').textContent = (vMode === 'auto') ? 'auto-on-path' :
                                 (vMode === 'gps')  ? 'GPS' : 'manual nudge';
 
-  // GPS accuracy label
+  // Source / accuracy label
   if (Sim.lastFix) {
     const acc = Sim.lastFix.coords.accuracy;
     const accStr = (acc !== null && !isNaN(acc)) ? `±${Math.round(acc)} m` : '';
     const lab = $('gpsTag');
-    lab.textContent = `GPS ${accStr}`;
-    if (acc > 15) lab.classList.add('warn'); else lab.classList.remove('warn');
+    const tag = (Sim.locSource === 'bridge') ? 'BRIDGE' : 'GPS';
+    lab.textContent = `${tag} ${accStr}`;
+    // accuracy warning only meaningful for real GPS
+    if (Sim.locSource === 'gps' && acc > 15) lab.classList.add('warn'); else lab.classList.remove('warn');
   }
 
   // MDA / DA banner
@@ -1245,6 +1310,7 @@ $('endResetBtn').addEventListener('click', resetToSetup);
 function resetToSetup() {
   if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
   Sim.watchId = null;
+  if (Sim._bridgeWs) { try { Sim._bridgeWs.close(); } catch(e){} Sim._bridgeWs = null; }
   if (Sim.rafId) cancelAnimationFrame(Sim.rafId);
   Sim.rafId = null;
   releaseWakeLock();
