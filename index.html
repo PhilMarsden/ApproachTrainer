@@ -680,6 +680,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.7.2  Hide Next Step / Step Δ before FAF — only relevant once descending
      0.7.1  Recompute always fires after auto-fill (was silently skipped if platAlt ≤ DA/MDA)
      0.7.0  RNP LNAV: drop "lateral only", unify with ILS pattern (angle ↔ FAF→MAP, MDA)
      0.6.0  FAF→MAP input linked to GS angle; remove field elev; LNAV+V hides GS bar
@@ -692,7 +693,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.7.1';
+const APP_VERSION = 'v0.7.2';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1596,11 +1597,13 @@ function render() {
 
   // Step-down: target altitude at the next whole-NM crossing toward threshold.
   // Same path angle as the GS/advisory path used elsewhere.
+  // Only meaningful AFTER the FAF — before that, the pilot is holding platform
+  // altitude and there's no descent step to plan, so we suppress the readouts.
   const stepAngleDeg = pathAngleDeg;
   let nextStepNM = null;
   let nextStepAlt = null;
   let stepDelta = null;
-  if (distThrNM > 0.05) {
+  if (distFafNM <= 0 && distThrNM > 0.05) {
     // Floor with a tiny epsilon so we don't get stuck on an exact NM mark.
     nextStepNM = Math.floor(distThrNM - 0.001);
     if (nextStepNM >= 0) {
@@ -1624,9 +1627,9 @@ function render() {
     $('rStepDeltaSub').textContent = label;
   } else {
     $('rNextStep').textContent = '— ft';
-    $('rNextStepSub').textContent = 'past threshold';
+    $('rNextStepSub').textContent = (distFafNM > 0) ? 'pre-FAF' : 'past threshold';
     $('rStepDelta').textContent = '—';
-    $('rStepDelta').className = 'val';
+    $('rStepDelta').className = 'val dim';
     $('rStepDeltaSub').textContent = '';
   }
 
