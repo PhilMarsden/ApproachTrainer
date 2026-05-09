@@ -642,9 +642,9 @@
           <div class="sub" id="rTgtAltSub">Δ — ft</div>
         </div>
         <div class="readout">
-          <div class="lbl">Tgt FPM</div>
-          <div class="val amber" id="rTgtFpm">— fpm</div>
-          <div class="sub" id="rTgtFpmSub">at current GS</div>
+          <div class="lbl">VS</div>
+          <div class="val" id="rVs">— fpm</div>
+          <div class="sub" id="rVsSub">tgt — fpm</div>
         </div>
         <div class="readout">
           <div class="lbl">GS</div>
@@ -672,10 +672,6 @@
         </div>
       </div>
 
-      <div class="nudge" id="nudgeRow">
-        <button id="nudgeUp">+25 ft (fly UP)</button>
-        <button id="nudgeDn">−25 ft (fly DN)</button>
-      </div>
       <div class="nudge" id="speedRow">
         <button id="speedDn">−10 kt</button>
         <span class="mid-readout" id="speedReadout">— kt</span>
@@ -704,6 +700,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.9.0  Drop ±25 ft nudges; VS readout shows current + target in all modes
      0.8.0  Manual mode adds ±10 kt and ±100 fpm controls (persistent; FPM integrates)
      0.7.2  Hide Next Step / Step Δ before FAF — only relevant once descending
      0.7.1  Recompute always fires after auto-fill (was silently skipped if platAlt ≤ DA/MDA)
@@ -718,7 +715,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.8.0';
+const APP_VERSION = 'v0.9.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1152,6 +1149,7 @@ const Sim = {
   lastFix: null,
   smooth: [],   // moving average for lat/lon
   altSmooth: [],
+  altHistory: [], // {t, alt} for vertical-speed derivative — last ~5 s
   gsSmooth: [], // groundspeed moving average (m/s)
   // track lock candidate
   walkedM: 0,
@@ -1159,13 +1157,11 @@ const Sim = {
   // state
   paused: false,
   ended: false,
-  // manual nudge (one-shot ±25 ft, decays back to zero)
-  manualOffset: 0,
-  manualDecayLast: null,
   // manual flight controls (persistent — set with the +/- buttons)
   manualGsKt: null,        // null = use real GPS/Bridge speed
   manualFpm: 0,            // ft/min vertical speed
   manualVsOffset: 0,       // accumulated displacement from manualFpm × time
+  manualDecayLast: null,   // for dt of the VS integration
   // animation
   rafId: null,
 };
@@ -1209,6 +1205,7 @@ function beginSimulation(cfg) {
   Sim.cfg = cfg;
   Sim.smooth = [];
   Sim.altSmooth = [];
+  Sim.altHistory = [];
   Sim.gsSmooth = [];
   Sim.walkedM = 0;
   Sim.trackLocked = false;
@@ -1390,10 +1387,15 @@ function onUpdate(pos) {
   // smoothing buffer (3-sample MA)
   Sim.smooth.push({ lat: p.latitude, lon: p.longitude });
   if (Sim.smooth.length > 3) Sim.smooth.shift();
-  // GPS altitude moving average (5)
+  // GPS altitude moving average (5) and a longer (5 s) history for VS.
   if (typeof p.altitude === 'number' && !isNaN(p.altitude)) {
     Sim.altSmooth.push(p.altitude);
     if (Sim.altSmooth.length > 5) Sim.altSmooth.shift();
+    const tNow = performance.now() / 1000;
+    Sim.altHistory.push({ t: tNow, alt: p.altitude * FT_PER_M });
+    while (Sim.altHistory.length > 0 && tNow - Sim.altHistory[0].t > 5) {
+      Sim.altHistory.shift();
+    }
   }
   // Groundspeed (m/s) moving average — used for Tgt FPM and the GS readout.
   if (typeof p.speed === 'number' && !isNaN(p.speed) && p.speed >= 0) {
@@ -1513,26 +1515,14 @@ function render() {
     const altM = smoothedAltM();
     curAltFt = (altM !== null) ? altM * FT_PER_M : refAltFt;
   } else {
-    // Manual mode. Three layered offsets from the procedure altitude:
-    //   manualOffset    — one-shot ±25 ft nudge, decays at 5 ft/s
-    //   manualVsOffset  — integrated displacement from the persistent ±100 fpm VS
-    //   manualGsKt      — used elsewhere as the groundspeed override
+    // Manual mode — altitude integrates the user-set vertical speed (±100 fpm
+    // buttons) over real time. manualGsKt overrides groundspeed elsewhere.
     const now = performance.now();
     if (Sim.manualDecayLast === null) Sim.manualDecayLast = now;
     const dt = (now - Sim.manualDecayLast) / 1000;
     Sim.manualDecayLast = now;
-
-    // Integrate manualFpm (ft/min) into manualVsOffset (ft) over real time.
     Sim.manualVsOffset += (Sim.manualFpm || 0) / 60 * dt;
-
-    // Decay the nudge offset toward zero.
-    if (Sim.manualOffset !== 0) {
-      const decay = 5 * dt;
-      if (Math.abs(Sim.manualOffset) <= decay) Sim.manualOffset = 0;
-      else Sim.manualOffset -= Math.sign(Sim.manualOffset) * decay;
-    }
-
-    curAltFt = refAltFt + Sim.manualOffset + Sim.manualVsOffset;
+    curAltFt = refAltFt + Sim.manualVsOffset;
   }
 
   // vertical deviation in feet (positive = above ideal)
@@ -1622,18 +1612,52 @@ function render() {
     $('rGsSub').textContent = 'no speed data';
   }
 
-  if (hasVert && gsKt !== null && gsKt >= 5) {
-    const tgtFpm = gsKt * (FT_PER_NM / 60) * Math.tan(pathAngleDeg * DEG);
-    $('rTgtFpm').textContent = `${Math.round(tgtFpm)} fpm`;
-    $('rTgtFpmSub').textContent = (distFafNM > 0)
-      ? 'after FAF intercept'
-      : `${pathAngleDeg.toFixed(1)}° path`;
-  } else if (!hasVert) {
-    $('rTgtFpm').textContent = '— fpm';
-    $('rTgtFpmSub').textContent = 'no vertical guidance';
+  // Current vertical speed.
+  //   Manual mode: the user-set FPM (drives altitude integration).
+  //   Auto / GPS:  derived from the GPS/Bridge altitude history (last 5 s).
+  let curVs = null;
+  if (vMode === 'manual') {
+    curVs = Sim.manualFpm | 0;
+  } else if (Sim.altHistory.length >= 2) {
+    const first = Sim.altHistory[0];
+    const last  = Sim.altHistory[Sim.altHistory.length - 1];
+    const dtSec = last.t - first.t;
+    if (dtSec > 0.5) curVs = (last.alt - first.alt) / dtSec * 60;
+  }
+
+  // Target vertical speed: 0 pre-FAF (level), then descent rate based on
+  // groundspeed and path angle.
+  let tgtVs = null;
+  if (distFafNM > 0) {
+    tgtVs = 0;
+  } else if (hasVert && gsKt !== null && gsKt >= 5) {
+    tgtVs = -gsKt * (FT_PER_NM / 60) * Math.tan(pathAngleDeg * DEG);
+  }
+
+  // Render the VS readout — main shows current, sub shows target.
+  if (curVs !== null) {
+    const sign = curVs > 0 ? '+' : '';
+    $('rVs').textContent = `${sign}${Math.round(curVs)} fpm`;
+    let cls = '';
+    if (tgtVs !== null) {
+      const diff = curVs - tgtVs;       // positive = climbing relative to target
+      if (Math.abs(diff) > 200)      cls = 'red';
+      else if (Math.abs(diff) > 100) cls = 'amber';
+    }
+    $('rVs').className = `val ${cls}`;
   } else {
-    $('rTgtFpm').textContent = '— fpm';
-    $('rTgtFpmSub').textContent = 'awaiting groundspeed';
+    $('rVs').textContent = '— fpm';
+    $('rVs').className = 'val';
+  }
+  if (tgtVs !== null) {
+    if (tgtVs === 0) {
+      $('rVsSub').textContent = 'tgt 0 fpm (level)';
+    } else {
+      const sign = tgtVs > 0 ? '+' : '';
+      $('rVsSub').textContent = `tgt ${sign}${Math.round(tgtVs)} fpm`;
+    }
+  } else {
+    $('rVsSub').textContent = 'tgt — fpm';
   }
 
   // Step-down: target altitude at the next whole-NM crossing toward threshold.
@@ -1718,12 +1742,10 @@ function updateManualReadouts() {
 bindSeg($('vModeSeg'), v => {
   vMode = v;
   const isManual = v === 'manual';
-  $('nudgeRow').classList.toggle('show', isManual);
   $('speedRow').classList.toggle('show', isManual);
   $('vsRow').classList.toggle('show', isManual);
   if (!isManual) {
     // Leaving manual — clear all manual state.
-    Sim.manualOffset = 0;
     Sim.manualGsKt = null;
     Sim.manualFpm = 0;
     Sim.manualVsOffset = 0;
@@ -1745,8 +1767,6 @@ bindSeg($('vModeSeg'), v => {
   }
 });
 
-$('nudgeUp').addEventListener('click', () => { Sim.manualOffset += 25; });
-$('nudgeDn').addEventListener('click', () => { Sim.manualOffset -= 25; });
 $('speedUp').addEventListener('click', () => {
   Sim.manualGsKt = (Sim.manualGsKt ?? 90) + 10;
   updateManualReadouts();
@@ -1792,11 +1812,11 @@ function resetToSetup() {
   Sim.lastFix = null;
   Sim.smooth = [];
   Sim.altSmooth = [];
+  Sim.altHistory = [];
   Sim.gsSmooth = [];
   Sim.derivedCourse = false;
   Sim.ended = false;
   Sim.paused = false;
-  Sim.manualOffset = 0;
   Sim.manualGsKt = null;
   Sim.manualFpm = 0;
   Sim.manualVsOffset = 0;
