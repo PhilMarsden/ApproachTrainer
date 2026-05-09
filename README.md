@@ -1,5 +1,4 @@
-[README.md](https://github.com/user-attachments/files/27557571/README.md)
-
+[README.md](https://github.com/user-attachments/files/27557600/README.md)
 # Instrument Approach Simulator
 
 A single-page web app that lets a pilot fly a simulated **ILS** or **RNP LNAV**
@@ -27,7 +26,7 @@ fly the approach physically, or sit at home and fly it from the sim.
 
 ## Quick start
 
-### Mode 1 — Walking outdoors with device GPS
+### Mode 1 — Flying with device GPS
 
 1. Open `index.html` on a phone, tablet, or laptop with GPS.
 2. Grant location permission when prompted.
