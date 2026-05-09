@@ -352,6 +352,7 @@
   .nudge {
     display: none;
     gap: 6px;
+    align-items: center;
   }
   .nudge.show { display: flex; }
   .nudge button {
@@ -363,6 +364,19 @@
     min-height: 44px;
     font-size: 14px;
     cursor: pointer;
+  }
+  .nudge .mid-readout {
+    flex: 1;
+    text-align: center;
+    color: var(--amber);
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
   }
 
   .banner {
@@ -662,6 +676,16 @@
         <button id="nudgeUp">+25 ft (fly UP)</button>
         <button id="nudgeDn">−25 ft (fly DN)</button>
       </div>
+      <div class="nudge" id="speedRow">
+        <button id="speedDn">−10 kt</button>
+        <span class="mid-readout" id="speedReadout">— kt</span>
+        <button id="speedUp">+10 kt</button>
+      </div>
+      <div class="nudge" id="vsRow">
+        <button id="vsDn">−100 fpm</button>
+        <span class="mid-readout" id="vsReadout">0 fpm</span>
+        <button id="vsUp">+100 fpm</button>
+      </div>
 
       <div class="controls">
         <button id="pauseBtn" class="primary">Pause</button>
@@ -680,6 +704,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.8.0  Manual mode adds ±10 kt and ±100 fpm controls (persistent; FPM integrates)
      0.7.2  Hide Next Step / Step Δ before FAF — only relevant once descending
      0.7.1  Recompute always fires after auto-fill (was silently skipped if platAlt ≤ DA/MDA)
      0.7.0  RNP LNAV: drop "lateral only", unify with ILS pattern (angle ↔ FAF→MAP, MDA)
@@ -693,7 +718,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.7.2';
+const APP_VERSION = 'v0.8.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1134,9 +1159,13 @@ const Sim = {
   // state
   paused: false,
   ended: false,
-  // manual nudge
+  // manual nudge (one-shot ±25 ft, decays back to zero)
   manualOffset: 0,
   manualDecayLast: null,
+  // manual flight controls (persistent — set with the +/- buttons)
+  manualGsKt: null,        // null = use real GPS/Bridge speed
+  manualFpm: 0,            // ft/min vertical speed
+  manualVsOffset: 0,       // accumulated displacement from manualFpm × time
   // animation
   rafId: null,
 };
@@ -1484,18 +1513,26 @@ function render() {
     const altM = smoothedAltM();
     curAltFt = (altM !== null) ? altM * FT_PER_M : refAltFt;
   } else {
-    // manual nudge: procedure altitude + offset
-    curAltFt = refAltFt + Sim.manualOffset;
-    // decay toward zero at 5 ft/s
+    // Manual mode. Three layered offsets from the procedure altitude:
+    //   manualOffset    — one-shot ±25 ft nudge, decays at 5 ft/s
+    //   manualVsOffset  — integrated displacement from the persistent ±100 fpm VS
+    //   manualGsKt      — used elsewhere as the groundspeed override
     const now = performance.now();
     if (Sim.manualDecayLast === null) Sim.manualDecayLast = now;
     const dt = (now - Sim.manualDecayLast) / 1000;
     Sim.manualDecayLast = now;
+
+    // Integrate manualFpm (ft/min) into manualVsOffset (ft) over real time.
+    Sim.manualVsOffset += (Sim.manualFpm || 0) / 60 * dt;
+
+    // Decay the nudge offset toward zero.
     if (Sim.manualOffset !== 0) {
       const decay = 5 * dt;
       if (Math.abs(Sim.manualOffset) <= decay) Sim.manualOffset = 0;
       else Sim.manualOffset -= Math.sign(Sim.manualOffset) * decay;
     }
+
+    curAltFt = refAltFt + Sim.manualOffset + Sim.manualVsOffset;
   }
 
   // vertical deviation in feet (positive = above ideal)
@@ -1571,7 +1608,11 @@ function render() {
   const gsMs = Sim.gsSmooth.length > 0
     ? Sim.gsSmooth.reduce((a,b) => a+b, 0) / Sim.gsSmooth.length
     : null;
-  const gsKt = (gsMs !== null) ? gsMs * 1.9438444924406046 : null;
+  let gsKt = (gsMs !== null) ? gsMs * 1.9438444924406046 : null;
+  // In manual mode, the user-set value overrides the real source.
+  if (vMode === 'manual' && Sim.manualGsKt !== null) {
+    gsKt = Sim.manualGsKt;
+  }
 
   if (gsKt !== null) {
     $('rGs').textContent = `${Math.round(gsKt)} kt`;
@@ -1664,14 +1705,64 @@ function render() {
 /* vertical mode segment */
 let vMode = 'auto';
 function currentVMode() { return vMode; }
+
+function updateManualReadouts() {
+  const kt = Sim.manualGsKt;
+  $('speedReadout').textContent = (kt !== null && !isNaN(kt))
+    ? `${Math.round(kt)} kt` : '— kt';
+  const fpm = Sim.manualFpm | 0;
+  const sign = fpm > 0 ? '+' : '';
+  $('vsReadout').textContent = `${sign}${fpm} fpm`;
+}
+
 bindSeg($('vModeSeg'), v => {
   vMode = v;
-  $('nudgeRow').classList.toggle('show', v === 'manual');
-  if (v !== 'manual') Sim.manualOffset = 0;
+  const isManual = v === 'manual';
+  $('nudgeRow').classList.toggle('show', isManual);
+  $('speedRow').classList.toggle('show', isManual);
+  $('vsRow').classList.toggle('show', isManual);
+  if (!isManual) {
+    // Leaving manual — clear all manual state.
+    Sim.manualOffset = 0;
+    Sim.manualGsKt = null;
+    Sim.manualFpm = 0;
+    Sim.manualVsOffset = 0;
+  } else {
+    // Entering manual — seed groundspeed from the most recent real reading
+    // (if we have one), rounded to 10 kt; default to 90 kt otherwise.
+    if (Sim.manualGsKt === null) {
+      let seed = 90;
+      if (Sim.gsSmooth.length > 0) {
+        const ms = Sim.gsSmooth.reduce((a,b) => a+b, 0) / Sim.gsSmooth.length;
+        const kt = ms * 1.9438444924406046;
+        if (kt > 0) seed = Math.max(10, Math.round(kt / 10) * 10);
+      }
+      Sim.manualGsKt = seed;
+    }
+    Sim.manualVsOffset = 0;
+    Sim.manualDecayLast = null;
+    updateManualReadouts();
+  }
 });
 
 $('nudgeUp').addEventListener('click', () => { Sim.manualOffset += 25; });
 $('nudgeDn').addEventListener('click', () => { Sim.manualOffset -= 25; });
+$('speedUp').addEventListener('click', () => {
+  Sim.manualGsKt = (Sim.manualGsKt ?? 90) + 10;
+  updateManualReadouts();
+});
+$('speedDn').addEventListener('click', () => {
+  Sim.manualGsKt = Math.max(0, (Sim.manualGsKt ?? 90) - 10);
+  updateManualReadouts();
+});
+$('vsUp').addEventListener('click', () => {
+  Sim.manualFpm = (Sim.manualFpm | 0) + 100;
+  updateManualReadouts();
+});
+$('vsDn').addEventListener('click', () => {
+  Sim.manualFpm = (Sim.manualFpm | 0) - 100;
+  updateManualReadouts();
+});
 
 /* pause / reset / lock track */
 $('pauseBtn').addEventListener('click', () => {
@@ -1705,6 +1796,11 @@ function resetToSetup() {
   Sim.derivedCourse = false;
   Sim.ended = false;
   Sim.paused = false;
+  Sim.manualOffset = 0;
+  Sim.manualGsKt = null;
+  Sim.manualFpm = 0;
+  Sim.manualVsOffset = 0;
+  Sim.manualDecayLast = null;
   $('pauseBtn').classList.remove('on');
   $('pauseBtn').textContent = 'Pause';
   $('endBanner').classList.remove('show');
