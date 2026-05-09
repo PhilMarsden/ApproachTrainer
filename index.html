@@ -680,6 +680,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.7.1  Recompute always fires after auto-fill (was silently skipped if platAlt ≤ DA/MDA)
      0.7.0  RNP LNAV: drop "lateral only", unify with ILS pattern (angle ↔ FAF→MAP, MDA)
      0.6.0  FAF→MAP input linked to GS angle; remove field elev; LNAV+V hides GS bar
      0.5.0  Source-aware platalt auto-fill (GPS or Bridge); "use current" button
@@ -691,7 +692,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.7.0';
+const APP_VERSION = 'v0.7.1';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -826,23 +827,25 @@ function recomputeFafMap() {
   const platAlt = +$('platalt').value;
   const da = +$('ilsDa').value;
   const gsAngle = +$('gsAngle').value;
-  if (platAlt > da && gsAngle > 0) {
-    const distNM = (platAlt - da) / Math.tan(gsAngle * DEG) / FT_PER_NM;
-    ilsRecomputing = true;
-    $('faMapDist').value = distNM.toFixed(2);
-    ilsRecomputing = false;
-  }
+  if (gsAngle <= 0) return;
+  // Always update the field — clamp to 0 if platAlt ≤ DA so the user sees a
+  // value change (and 0.00 is an obvious "geometry invalid" signal).
+  const altDelta = Math.max(0, platAlt - da);
+  const distNM = altDelta / Math.tan(gsAngle * DEG) / FT_PER_NM;
+  ilsRecomputing = true;
+  $('faMapDist').value = distNM.toFixed(2);
+  ilsRecomputing = false;
 }
 function recomputeGsAngle() {
   const platAlt = +$('platalt').value;
   const da = +$('ilsDa').value;
   const distNM = +$('faMapDist').value;
-  if (platAlt > da && distNM > 0) {
-    const angleDeg = Math.atan2(platAlt - da, distNM * FT_PER_NM) * RAD;
-    ilsRecomputing = true;
-    $('gsAngle').value = angleDeg.toFixed(2);
-    ilsRecomputing = false;
-  }
+  if (distNM <= 0) return;
+  const altDelta = Math.max(0, platAlt - da);
+  const angleDeg = Math.atan2(altDelta, distNM * FT_PER_NM) * RAD;
+  ilsRecomputing = true;
+  $('gsAngle').value = angleDeg.toFixed(2);
+  ilsRecomputing = false;
 }
 function syncIlsGeometry() {
   if (lastIlsEdit === 'gs') recomputeFafMap();
@@ -875,23 +878,23 @@ function recomputeLnavFafMap() {
   const platAlt = +$('platalt').value;
   const mda     = +$('mda').value;
   const angle   = +$('lnavAngle').value;
-  if (platAlt > mda && angle > 0) {
-    const distNM = (platAlt - mda) / Math.tan(angle * DEG) / FT_PER_NM;
-    lnavRecomputing = true;
-    $('lnavFaMapDist').value = distNM.toFixed(2);
-    lnavRecomputing = false;
-  }
+  if (angle <= 0) return;
+  const altDelta = Math.max(0, platAlt - mda);
+  const distNM = altDelta / Math.tan(angle * DEG) / FT_PER_NM;
+  lnavRecomputing = true;
+  $('lnavFaMapDist').value = distNM.toFixed(2);
+  lnavRecomputing = false;
 }
 function recomputeLnavAngle() {
   const platAlt = +$('platalt').value;
   const mda     = +$('mda').value;
   const distNM  = +$('lnavFaMapDist').value;
-  if (platAlt > mda && distNM > 0) {
-    const angleDeg = Math.atan2(platAlt - mda, distNM * FT_PER_NM) * RAD;
-    lnavRecomputing = true;
-    $('lnavAngle').value = angleDeg.toFixed(2);
-    lnavRecomputing = false;
-  }
+  if (distNM <= 0) return;
+  const altDelta = Math.max(0, platAlt - mda);
+  const angleDeg = Math.atan2(altDelta, distNM * FT_PER_NM) * RAD;
+  lnavRecomputing = true;
+  $('lnavAngle').value = angleDeg.toFixed(2);
+  lnavRecomputing = false;
 }
 function syncLnavGeometry() {
   if (lastLnavEdit === 'angle') recomputeLnavFafMap();
