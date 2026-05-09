@@ -272,6 +272,7 @@
   }
   .readout .val.amber { color: var(--amber); }
   .readout .val.dim { color: var(--ink-dim); }
+  .readout .val.red { color: var(--red); }
   .readout .sub {
     font-size: 11px;
     color: var(--ink-dim);
@@ -412,7 +413,7 @@
      SETUP SCREEN
      ========================================================= -->
 <section id="setup" class="screen active">
-  <h1>Approach Simulator <span id="appVersionTag" style="font-size:11px;color:var(--ink-dim);letter-spacing:0.06em;font-weight:normal">v0.3.0</span></h1>
+  <h1>Approach Simulator <span id="appVersionTag" style="font-size:11px;color:var(--ink-dim);letter-spacing:0.06em;font-weight:normal">v0.4.0</span></h1>
   <div class="sub">Walk a simulated ILS or RNP LNAV approach. Your real-world walking maps onto the final-approach segment.</div>
   <div class="disclaimer">Training simulation only. Not for navigation.</div>
 
@@ -608,6 +609,16 @@
           <div class="val" id="rGs">— kt</div>
           <div class="sub" id="rGsSub"></div>
         </div>
+        <div class="readout">
+          <div class="lbl">Next Step</div>
+          <div class="val amber" id="rNextStep">— ft</div>
+          <div class="sub" id="rNextStepSub"></div>
+        </div>
+        <div class="readout">
+          <div class="lbl">Step Δ</div>
+          <div class="val" id="rStepDelta">—</div>
+          <div class="sub" id="rStepDeltaSub"></div>
+        </div>
       </div>
 
       <div class="vmode-row">
@@ -785,6 +796,27 @@ $('fieldElev').addEventListener('input', () => {
     $('ilsDa').value = fe + 200;
   }
 });
+
+// Prefill platform altitude from device GPS on first load. Skip if the user
+// has typed a value already; skip silently on permission denial / timeout.
+let platAltUserEdited = false;
+$('platalt').addEventListener('input', () => { platAltUserEdited = true; });
+if ('geolocation' in navigator) {
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      if (platAltUserEdited) return;
+      const altM = pos.coords.altitude;
+      if (typeof altM === 'number' && !isNaN(altM)) {
+        const altFt = Math.round(altM * FT_PER_M / 10) * 10; // round to 10 ft
+        $('platalt').value = altFt;
+        // Re-run advisory-angle validation in case it now changes.
+        validateAdvisoryAngle();
+      }
+    },
+    () => { /* permission denied or timeout - keep the typed default */ },
+    { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+  );
+}
 
 function readSetupValues() {
   const v = {
@@ -1329,6 +1361,46 @@ function render() {
   } else {
     $('rTgtFpm').textContent = '— fpm';
     $('rTgtFpmSub').textContent = 'awaiting groundspeed';
+  }
+
+  // Step-down: target altitude at the next whole-NM crossing toward threshold.
+  // For ILS / LNAV+V this follows the GS / advisory path. For LNAV-only we
+  // generate a 3° reference so the pilot still has a profile to fly.
+  const stepAngleDeg = (c.apprType === 'ILS') ? c.gsAngle
+                     : (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV')
+                         ? (Sim.advisoryAngleDeg || 3.0)
+                         : 3.0;  // LNAV-only fallback profile
+  let nextStepNM = null;
+  let nextStepAlt = null;
+  let stepDelta = null;
+  if (distThrNM > 0.05) {
+    // Floor with a tiny epsilon so we don't get stuck on an exact NM mark.
+    nextStepNM = Math.floor(distThrNM - 0.001);
+    if (nextStepNM >= 0) {
+      nextStepAlt = c.fieldElev + nextStepNM * FT_PER_NM * Math.tan(stepAngleDeg * DEG);
+      stepDelta = curAltFt - nextStepAlt;
+    }
+  }
+  if (nextStepNM !== null && nextStepAlt !== null) {
+    $('rNextStep').textContent = `${Math.round(nextStepAlt)} ft`;
+    $('rNextStepSub').textContent = (nextStepNM === 0)
+      ? `at threshold`
+      : `at ${nextStepNM} NM from thr`;
+    const sign = stepDelta >= 0 ? '+' : '';
+    $('rStepDelta').textContent = `${sign}${Math.round(stepDelta)} ft`;
+    // Below the minimum is the dangerous case — flag in red.
+    let cls = '';
+    let label = 'on profile';
+    if (stepDelta < -10)      { cls = 'red';   label = 'BELOW — climb'; }
+    else if (stepDelta > 10)  { cls = 'amber'; label = 'above'; }
+    $('rStepDelta').className = `val ${cls}`;
+    $('rStepDeltaSub').textContent = label;
+  } else {
+    $('rNextStep').textContent = '— ft';
+    $('rNextStepSub').textContent = 'past threshold';
+    $('rStepDelta').textContent = '—';
+    $('rStepDelta').className = 'val';
+    $('rStepDeltaSub').textContent = '';
   }
 
   // Source / accuracy label
