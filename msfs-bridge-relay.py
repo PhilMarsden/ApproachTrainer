@@ -4,7 +4,7 @@ msfs-bridge-relay.py
 ====================
 
 Tiny relay for the Instrument Approach Simulator: it listens for position
-broadcasts from MSFS Bridge (or any GDL90 / NMEA source) on UDP and
+broadcasts from MSFS Bridge (or any GDL90 / NMEA / XGPS source) on UDP and
 re-publishes them as JSON messages over a local WebSocket so that the
 browser-based simulator can consume them.
 
@@ -15,30 +15,36 @@ Setup
 Run
 ---
     python msfs-bridge-relay.py
-    # defaults: UDP listen port 4000, WS listen port 9090
+    # defaults: UDP listen port 49002, WS listen port 9090
 
-Then in MSFS Bridge, configure it to broadcast GDL90 (or NMEA) to this
-machine's address on UDP/4000 (the typical ForeFlight default), and in
+Then in MSFS Bridge, configure it to broadcast to this machine's address on
+UDP/49002 (the ForeFlight default that MSFS Bridge uses by default), and in
 the simulator pick "MSFS Bridge" with URL ws://<this-host>:9090
 
 Order
 -----
-The bridge can be started *before or after* the relay - UDP is connectionless,
+The bridge can be started before or after the relay - UDP is connectionless,
 so packets arriving while the relay is down are simply dropped by the OS, and
 the relay starts catching them as soon as it binds the port.
 
+Supported wire formats
+----------------------
+  * ForeFlight XGPS / XATT  (text, default on UDP 49002 - what MSFS Bridge sends)
+  * GDL90 Ownship Report    (binary, framed with 0x7E flags - typical UDP 4000)
+  * NMEA $GPGGA / $GPRMC    (text, fallback)
+
 CLI
 ---
-    --udp-port    UDP port to listen on (default 4000)
+    --udp-port    UDP port to listen on (default 49002)
     --ws-host     WebSocket bind host    (default 0.0.0.0 - LAN-reachable)
     --ws-port     WebSocket port         (default 9090)
     --quiet       Suppress per-packet logging (heartbeat only)
     --verbose     Extra detail per packet (full hex + ASCII preview)
 
-Output JSON shape (one message per parsed packet):
+Output JSON shape (one message per parsed position fix):
     {"lat": <deg>, "lon": <deg>, "alt_ft": <ft MSL or null>,
      "hdg": <deg or null>, "gs_kt": <knots or null>,
-     "src": "gdl90"|"nmea", "ts": <unix seconds>}
+     "src": "xgps"|"gdl90"|"nmea", "ts": <unix seconds>}
 """
 
 from __future__ import annotations
@@ -55,6 +61,95 @@ except ImportError:
     raise SystemExit("Missing dependency. Run:  pip install websockets")
 
 
+M_TO_FT = 3.28083989501312
+MPS_TO_KT = 1.9438444924406046
+
+# Module-level shared state for XATT heading (XATT comes in separate datagrams
+# from XGPS; we merge the most-recent XATT heading into the next XGPS fix).
+_last_xatt = {"hdg": None, "pitch": None, "roll": None, "ts": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# ForeFlight broadcast (XGPS / XATT) - text CSV after a 4-char tag
+# ---------------------------------------------------------------------------
+#
+# XGPS<sim>,<lon>,<lat>,<alt_m_msl>,<track_deg>,<gs_m/s>
+# XATT<sim>,<heading_true>,<pitch>,<roll>
+#
+# Example as MSFS Bridge sends them (one per UDP datagram, multiple per second):
+#   XGPSMSFS,-122.4194,37.7749,1500.0,89.5,30.5
+#   XATTMSFS,89.5,2.1,-1.2
+#
+def parse_foreflight(text: str) -> Optional[dict]:
+    """Parse a single XGPS or XATT line.
+
+    Returns a position dict for XGPS (with lat/lon/alt/hdg/gs).
+    For XATT, updates module state and returns a small attitude dict
+    (no lat/lon, so the browser side will skip it but the relay logs it
+    as a recognised XATT packet rather than UNPARSED).
+    """
+    if not text:
+        return None
+    line = text.strip().split("\n", 1)[0].strip()
+    if not line.startswith("X"):
+        return None
+    parts = line.split(",")
+    if not parts:
+        return None
+    tag = parts[0]
+
+    if tag.startswith("XGPS") and len(parts) >= 6:
+        try:
+            lon = float(parts[1])
+            lat = float(parts[2])
+            alt_m = float(parts[3]) if parts[3] != "" else None
+            track = float(parts[4]) if parts[4] != "" else None
+            gs_mps = float(parts[5]) if parts[5] != "" else None
+        except ValueError:
+            return None
+
+        # Prefer XATT heading if it's fresh (last 2 s); else fall back to XGPS track.
+        hdg: Optional[float]
+        if (_last_xatt["hdg"] is not None
+                and (time.time() - _last_xatt["ts"]) < 2.0):
+            hdg = _last_xatt["hdg"]
+        else:
+            hdg = track
+
+        return {
+            "lat": lat,
+            "lon": lon,
+            "alt_ft": (alt_m * M_TO_FT) if alt_m is not None else None,
+            "hdg": hdg,
+            "gs_kt": (gs_mps * MPS_TO_KT) if gs_mps is not None else None,
+            "src": "xgps",
+            "ts": time.time(),
+        }
+
+    if tag.startswith("XATT") and len(parts) >= 4:
+        try:
+            heading = float(parts[1])
+            pitch = float(parts[2]) if parts[2] != "" else None
+            roll = float(parts[3]) if parts[3] != "" else None
+        except ValueError:
+            return None
+        _last_xatt["hdg"] = heading
+        _last_xatt["pitch"] = pitch
+        _last_xatt["roll"] = roll
+        _last_xatt["ts"] = time.time()
+        # Return an attitude-only dict (no lat/lon) so the relay logs it
+        # as recognised; the browser will skip it because it has no lat/lon.
+        return {
+            "src": "xatt",
+            "hdg": heading,
+            "pitch": pitch,
+            "roll": roll,
+            "ts": time.time(),
+        }
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # GDL90 frame parsing
 # ---------------------------------------------------------------------------
@@ -64,12 +159,7 @@ ESC = 0x7D
 
 
 def gdl90_unframe(buf: bytes) -> list:
-    """Split a UDP datagram into GDL90 frames, removing flags and byte-stuffing.
-
-    Each datagram from MSFS Bridge / ForeFlight bridges normally contains a
-    single framed message bracketed by 0x7E flags, but we handle multiple.
-    The 16-bit FCS is stripped (we don't verify it; UDP already has a CRC).
-    """
+    """Split a UDP datagram into GDL90 frames, removing flags and byte-stuffing."""
     frames = []
     i, n = 0, len(buf)
     while i < n:
@@ -92,11 +182,7 @@ def gdl90_unframe(buf: bytes) -> list:
 
 
 def parse_gdl90_ownship(p: bytes) -> Optional[dict]:
-    """Parse a GDL90 Ownship Report (Message ID 10 / 0x0A).
-
-    Returns None if not an ownship message or the buffer is too short.
-    Reference: GDL 90 Data Interface Specification, section 3.4.
-    """
+    """Parse a GDL90 Ownship Report (Message ID 10 / 0x0A)."""
     if len(p) < 28 or p[0] != 0x0A:
         return None
 
@@ -108,14 +194,11 @@ def parse_gdl90_ownship(p: bytes) -> Optional[dict]:
 
     lat = s24(p[5], p[6], p[7]) * (180.0 / (1 << 23))
     lon = s24(p[8], p[9], p[10]) * (180.0 / (1 << 23))
-
     alt_raw = (p[11] << 4) | (p[12] >> 4)
     alt_ft = None if alt_raw == 0xFFF else (alt_raw * 25.0 - 1000.0)
-
     hv_raw = (p[13] << 4) | (p[14] >> 4)
     gs_kt = None if hv_raw == 0xFFF else float(hv_raw)
     hdg = (p[16] * (360.0 / 256.0)) if len(p) > 16 else None
-
     return {
         "lat": lat, "lon": lon,
         "alt_ft": alt_ft,
@@ -162,7 +245,7 @@ def parse_nmea(line: str) -> Optional[dict]:
             return None
         return {
             "lat": lat, "lon": lon,
-            "alt_ft": (alt_m * 3.28084) if alt_m is not None else None,
+            "alt_ft": (alt_m * M_TO_FT) if alt_m is not None else None,
             "hdg": None, "gs_kt": None,
             "src": "nmea", "ts": time.time(),
         }
@@ -190,10 +273,33 @@ def parse_nmea(line: str) -> Optional[dict]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Datagram entry point: try formats in order
+# ---------------------------------------------------------------------------
+
 def parse_datagram(data: bytes) -> Optional[dict]:
-    """Try GDL90 first, then fall back to NMEA. Returns the most recent fix."""
+    """Try ForeFlight XGPS/XATT, then GDL90, then NMEA."""
     if not data:
         return None
+
+    # 1. ForeFlight XGPS / XATT (text, starts with 'X')
+    if data[:1] == b"X":
+        try:
+            text = data.decode("ascii", errors="ignore")
+        except Exception:
+            text = ""
+        if text:
+            # A datagram may contain multiple lines (e.g. XGPS + XATT). Parse
+            # each; keep the most recent positional fix to forward.
+            latest = None
+            for line in text.splitlines():
+                m = parse_foreflight(line)
+                if m:
+                    latest = m  # last wins; XATT-only updates state
+            if latest:
+                return latest
+
+    # 2. GDL90 (binary, framed with 0x7E)
     if data[:1] == b"\x7e" or b"\x7e" in data[:2]:
         latest = None
         for f in gdl90_unframe(data):
@@ -205,6 +311,8 @@ def parse_datagram(data: bytes) -> Optional[dict]:
                     latest = m
         if latest:
             return latest
+
+    # 3. NMEA (text $GP...)
     try:
         text = data.decode("ascii", errors="ignore")
     except Exception:
@@ -268,7 +376,7 @@ async def ws_handler(ws, hub: Hub):
 # ---------------------------------------------------------------------------
 
 class UDPProto(asyncio.DatagramProtocol):
-    """UDP listener: logs every datagram, parses GDL90/NMEA, fans out via Hub."""
+    """UDP listener: logs every datagram, parses, fans out via Hub."""
 
     def __init__(self, hub, loop, verbose: bool, quiet: bool):
         self.hub = hub
@@ -279,6 +387,7 @@ class UDPProto(asyncio.DatagramProtocol):
         self.bytes_rx = 0
         self.parsed = 0
         self.unparsed = 0
+        self.attitude_only = 0
         self.last_msg = None
         self.last_addr = None
         self.sources = {}
@@ -291,7 +400,8 @@ class UDPProto(asyncio.DatagramProtocol):
 
         m = parse_datagram(data)
 
-        if m:
+        # 1. Position fix (lat + lon present) - log + broadcast
+        if m and "lat" in m and "lon" in m:
             self.parsed += 1
             self.last_msg = m
             payload = json.dumps(m, separators=(",", ":"))
@@ -312,19 +422,35 @@ class UDPProto(asyncio.DatagramProtocol):
                 if self.verbose:
                     print(f"          hex: {data[:32].hex(' ')}"
                           + ("  ..." if len(data) > 32 else ""))
-        else:
-            self.unparsed += 1
-            head_hex = data[:32].hex(" ")
-            ellip = "  ..." if len(data) > 32 else ""
-            print(f"  RX {len(data):>4}B  {addr[0]}:{addr[1]:<5}  "
-                  f"[UNPARSED]  hex: {head_hex}{ellip}")
-            if self.verbose:
-                try:
-                    txt = data[:80].decode("ascii", errors="replace")
-                    txt = txt.replace("\r", "\\r").replace("\n", "\\n")
-                    print(f"          ascii: {txt!r}")
-                except Exception:
-                    pass
+            return
+
+        # 2. Recognised non-position packet (XATT) - log briefly, don't broadcast
+        if m and m.get("src") == "xatt":
+            self.attitude_only += 1
+            if not self.quiet:
+                hdg = m.get("hdg")
+                pitch = m.get("pitch")
+                roll = m.get("roll")
+                hdg_s = f"{hdg:5.1f}d" if hdg is not None else "  --d"
+                pitch_s = f"{pitch:5.1f}d" if pitch is not None else "  --d"
+                roll_s = f"{roll:5.1f}d" if roll is not None else "  --d"
+                print(f"  RX {len(data):>4}B  {addr[0]}:{addr[1]:<5}  "
+                      f"[xatt ]  hdg={hdg_s}  pitch={pitch_s}  roll={roll_s}")
+            return
+
+        # 3. Unparsed - this is the diagnostic case
+        self.unparsed += 1
+        head_hex = data[:32].hex(" ")
+        ellip = "  ..." if len(data) > 32 else ""
+        print(f"  RX {len(data):>4}B  {addr[0]}:{addr[1]:<5}  "
+              f"[UNPARSED]  hex: {head_hex}{ellip}")
+        if self.verbose:
+            try:
+                txt = data[:80].decode("ascii", errors="replace")
+                txt = txt.replace("\r", "\\r").replace("\n", "\\n")
+                print(f"          ascii: {txt!r}")
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -357,13 +483,13 @@ async def heartbeat(proto: UDPProto, hub: Hub) -> None:
         if proto.last_msg:
             lm = proto.last_msg
             if lm.get("alt_ft") is not None:
-                last_fix = f"{lm['lat']:.5f},{lm['lon']:.5f} alt={lm['alt_ft']} ft"
+                last_fix = f"{lm['lat']:.5f},{lm['lon']:.5f} alt={lm['alt_ft']:.0f} ft"
             else:
                 last_fix = f"{lm['lat']:.5f},{lm['lon']:.5f}"
         print(f"  [heartbeat] rx={proto.total_rx} parsed={proto.parsed} "
-              f"unparsed={proto.unparsed} rate={rate:.1f}/s "
-              f"ws_clients={len(hub.clients)}  senders=[{srcs}]  "
-              f"last_fix={last_fix}")
+              f"xatt={proto.attitude_only} unparsed={proto.unparsed} "
+              f"rate={rate:.1f}/s ws_clients={len(hub.clients)}  "
+              f"senders=[{srcs}]  last_fix={last_fix}")
 
 
 async def main_async(args) -> None:
@@ -393,7 +519,7 @@ async def main_async(args) -> None:
         return
 
     proto = proto_factory_holder["proto"]
-    print(f"UDP listening on 0.0.0.0:{args.udp_port}  (GDL90 / NMEA)")
+    print(f"UDP listening on 0.0.0.0:{args.udp_port}  (XGPS/XATT, GDL90, NMEA)")
     print("  -> Configure MSFS Bridge to broadcast to this PC's IP on that port.")
     print("  -> Bridge can be started before or after this relay.")
 
@@ -426,8 +552,8 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="MSFS Bridge UDP->WebSocket relay")
-    ap.add_argument("--udp-port", type=int, default=4000,
-                    help="UDP port to listen on (default 4000)")
+    ap.add_argument("--udp-port", type=int, default=49002,
+                    help="UDP port to listen on (default 49002)")
     ap.add_argument("--ws-host", default="0.0.0.0",
                     help="WebSocket bind host (default 0.0.0.0)")
     ap.add_argument("--ws-port", type=int, default=9090,
