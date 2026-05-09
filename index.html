@@ -663,6 +663,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.4.3  Fix LOC needle direction (was inverted — now points to centerline)
      0.4.2  Tgt Alt steps at whole NM after FAF for LNAV (matches charts)
      0.4.1  Centralise APP_VERSION; show on simulation screen
      0.4.0  Default platalt to GPS alt; LNAV step-down readouts
@@ -670,7 +671,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.4.2';
+const APP_VERSION = 'v0.4.3';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1331,8 +1332,12 @@ function render() {
   }
 
   // ----- update SVG needles -----
-  // Lateral needle: translate horizontally up to ±40 px (full-scale = 2nd dot)
-  const latX = latDef * 40;
+  // Lateral needle: translates horizontally up to ±40 px (full-scale = 2nd dot).
+  // CDI convention: the needle indicates the direction of the CENTERLINE, not
+  // the direction of the aircraft's displacement. So when the aircraft is RIGHT
+  // of centerline (xM > 0, latDef > 0), the needle deflects LEFT — "fly LEFT to
+  // intercept the needle". Hence the negation.
+  const latX = -latDef * 40;
   $('latNeedle').setAttribute('transform', `translate(${latX.toFixed(1)},0)`);
   $('latNeedle').setAttribute('stroke', latPegged ? 'var(--amber)' : 'var(--green)');
 
