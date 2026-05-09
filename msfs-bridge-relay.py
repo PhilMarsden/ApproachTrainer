@@ -21,12 +21,19 @@ Then in MSFS Bridge, configure it to broadcast GDL90 (or NMEA) to this
 machine's address on UDP/4000 (the typical ForeFlight default), and in
 the simulator pick "MSFS Bridge" with URL ws://<this-host>:9090
 
+Order
+-----
+The bridge can be started *before or after* the relay - UDP is connectionless,
+so packets arriving while the relay is down are simply dropped by the OS, and
+the relay starts catching them as soon as it binds the port.
+
 CLI
 ---
     --udp-port    UDP port to listen on (default 4000)
-    --ws-host     WebSocket bind host    (default 0.0.0.0 — LAN-reachable)
+    --ws-host     WebSocket bind host    (default 0.0.0.0 - LAN-reachable)
     --ws-port     WebSocket port         (default 9090)
-    --verbose     Log every parsed packet
+    --quiet       Suppress per-packet logging (heartbeat only)
+    --verbose     Extra detail per packet (full hex + ASCII preview)
 
 Output JSON shape (one message per parsed packet):
     {"lat": <deg>, "lon": <deg>, "alt_ft": <ft MSL or null>,
@@ -53,17 +60,17 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 FLAG = 0x7E
-ESC  = 0x7D
+ESC = 0x7D
 
 
-def gdl90_unframe(buf: bytes) -> list[bytes]:
+def gdl90_unframe(buf: bytes) -> list:
     """Split a UDP datagram into GDL90 frames, removing flags and byte-stuffing.
 
     Each datagram from MSFS Bridge / ForeFlight bridges normally contains a
     single framed message bracketed by 0x7E flags, but we handle multiple.
     The 16-bit FCS is stripped (we don't verify it; UDP already has a CRC).
     """
-    frames: list[bytes] = []
+    frames = []
     i, n = 0, len(buf)
     while i < n:
         if buf[i] != FLAG:
@@ -81,7 +88,6 @@ def gdl90_unframe(buf: bytes) -> list[bytes]:
                 i += 1
         if i < n and len(out) > 2:
             frames.append(bytes(out[:-2]))  # strip 2-byte CRC
-        # leave i pointing at the trailing flag — next loop will skip it
     return frames
 
 
@@ -89,9 +95,8 @@ def parse_gdl90_ownship(p: bytes) -> Optional[dict]:
     """Parse a GDL90 Ownship Report (Message ID 10 / 0x0A).
 
     Returns None if not an ownship message or the buffer is too short.
-    Reference: GDL 90 Data Interface Specification, §3.4.
+    Reference: GDL 90 Data Interface Specification, section 3.4.
     """
-    # Ownship message body is 28 bytes.
     if len(p) < 28 or p[0] != 0x0A:
         return None
 
@@ -101,20 +106,14 @@ def parse_gdl90_ownship(p: bytes) -> Optional[dict]:
             v -= 0x1000000
         return v
 
-    # Latitude / longitude: 24-bit signed semicircles, LSB = 180 / 2^23 degrees
     lat = s24(p[5], p[6], p[7]) * (180.0 / (1 << 23))
     lon = s24(p[8], p[9], p[10]) * (180.0 / (1 << 23))
 
-    # Pressure altitude: 12 bits, encoded as upper 12 bits of (p[11] p[12]).
-    # Resolution = 25 ft, offset = -1000 ft, 0xFFF = invalid.
     alt_raw = (p[11] << 4) | (p[12] >> 4)
-    alt_ft: Optional[float] = None if alt_raw == 0xFFF else (alt_raw * 25.0 - 1000.0)
+    alt_ft = None if alt_raw == 0xFFF else (alt_raw * 25.0 - 1000.0)
 
-    # Velocity / track sit at bytes 13–16 in compact form.
-    # Horizontal velocity (kt): 12 bits at p[13] high8 + p[14] high4
     hv_raw = (p[13] << 4) | (p[14] >> 4)
-    gs_kt: Optional[float] = None if hv_raw == 0xFFF else float(hv_raw)
-    # Track / heading: 8 bits, byte 16, units = 360/256 deg
+    gs_kt = None if hv_raw == 0xFFF else float(hv_raw)
     hdg = (p[16] * (360.0 / 256.0)) if len(p) > 16 else None
 
     return {
@@ -126,7 +125,7 @@ def parse_gdl90_ownship(p: bytes) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# NMEA fallback (some bridges emit $GPGGA / $GPRMC instead of GDL90)
+# NMEA fallback
 # ---------------------------------------------------------------------------
 
 def _nmea_dm_to_deg(s: str, hemi: str) -> Optional[float]:
@@ -196,7 +195,6 @@ def parse_datagram(data: bytes) -> Optional[dict]:
     if not data:
         return None
     if data[:1] == b"\x7e" or b"\x7e" in data[:2]:
-        # Looks framed — treat as GDL90.
         latest = None
         for f in gdl90_unframe(data):
             if not f:
@@ -207,7 +205,6 @@ def parse_datagram(data: bytes) -> Optional[dict]:
                     latest = m
         if latest:
             return latest
-    # Try NMEA — datagram may be one or several lines
     try:
         text = data.decode("ascii", errors="ignore")
     except Exception:
@@ -226,7 +223,7 @@ def parse_datagram(data: bytes) -> Optional[dict]:
 
 class Hub:
     def __init__(self) -> None:
-        self.clients: set = set()
+        self.clients = set()
         self._lock = asyncio.Lock()
 
     async def register(self, ws):
@@ -240,7 +237,6 @@ class Hub:
     async def broadcast(self, payload: str):
         if not self.clients:
             return
-        # Snapshot list to avoid mutation during iteration
         async with self._lock:
             targets = list(self.clients)
         await asyncio.gather(
@@ -256,86 +252,190 @@ class Hub:
 
 
 async def ws_handler(ws, hub: Hub):
+    peer = getattr(ws, "remote_address", None)
+    print(f"  [ws] client connected: {peer}")
     await hub.register(ws)
     try:
         async for _ in ws:
-            pass  # we ignore client messages; this is a one-way feed
+            pass
     finally:
         await hub.unregister(ws)
+        print(f"  [ws] client disconnected: {peer}")
 
 
 # ---------------------------------------------------------------------------
-# UDP listener (asyncio Datagram protocol)
+# UDP listener
 # ---------------------------------------------------------------------------
 
 class UDPProto(asyncio.DatagramProtocol):
-    def __init__(self, hub: Hub, loop: asyncio.AbstractEventLoop, verbose: bool):
+    """UDP listener: logs every datagram, parses GDL90/NMEA, fans out via Hub."""
+
+    def __init__(self, hub, loop, verbose: bool, quiet: bool):
         self.hub = hub
         self.loop = loop
         self.verbose = verbose
-        self.last_log = 0.0
-        self.count = 0
+        self.quiet = quiet
+        self.total_rx = 0
+        self.bytes_rx = 0
+        self.parsed = 0
+        self.unparsed = 0
+        self.last_msg = None
+        self.last_addr = None
+        self.sources = {}
 
     def datagram_received(self, data: bytes, addr) -> None:
+        self.total_rx += 1
+        self.bytes_rx += len(data)
+        self.last_addr = addr
+        self.sources[addr] = self.sources.get(addr, 0) + 1
+
         m = parse_datagram(data)
-        if not m:
-            return
-        self.count += 1
-        if self.verbose:
-            print(f"[{m['src']}] {m['lat']:.6f},{m['lon']:.6f} "
-                  f"alt={m['alt_ft']} hdg={m['hdg']} gs={m['gs_kt']}")
+
+        if m:
+            self.parsed += 1
+            self.last_msg = m
+            payload = json.dumps(m, separators=(",", ":"))
+            asyncio.ensure_future(self.hub.broadcast(payload))
+
+            if not self.quiet:
+                src_lbl = m["src"]
+                alt = m["alt_ft"]
+                alt_s = f"{alt:>5.0f} ft" if alt is not None else "  -- ft"
+                hdg = m["hdg"]
+                hdg_s = f"{hdg:5.1f}d" if hdg is not None else "  --d"
+                gs = m["gs_kt"]
+                gs_s = f"{gs:4.0f} kt" if gs is not None else "  -- kt"
+                print(f"  RX {len(data):>4}B  {addr[0]}:{addr[1]:<5}  "
+                      f"[{src_lbl:<5}]  "
+                      f"{m['lat']:>10.6f}, {m['lon']:>11.6f}   "
+                      f"{alt_s}  hdg={hdg_s}  gs={gs_s}")
+                if self.verbose:
+                    print(f"          hex: {data[:32].hex(' ')}"
+                          + ("  ..." if len(data) > 32 else ""))
         else:
-            now = time.monotonic()
-            if now - self.last_log > 2.0:
-                print(f"  fixes: {self.count}  last: {m['lat']:.5f},{m['lon']:.5f}  "
-                      f"alt_ft={m['alt_ft']}")
-                self.last_log = now
-        payload = json.dumps(m, separators=(",", ":"))
-        # Schedule the broadcast on the event loop (we're already on it).
-        asyncio.ensure_future(self.hub.broadcast(payload))
+            self.unparsed += 1
+            head_hex = data[:32].hex(" ")
+            ellip = "  ..." if len(data) > 32 else ""
+            print(f"  RX {len(data):>4}B  {addr[0]}:{addr[1]:<5}  "
+                  f"[UNPARSED]  hex: {head_hex}{ellip}")
+            if self.verbose:
+                try:
+                    txt = data[:80].decode("ascii", errors="replace")
+                    txt = txt.replace("\r", "\\r").replace("\n", "\\n")
+                    print(f"          ascii: {txt!r}")
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+async def heartbeat(proto: UDPProto, hub: Hub) -> None:
+    """Print a periodic stats line so the user knows the relay is alive."""
+    last_total = 0
+    last_t = time.monotonic()
+    while True:
+        await asyncio.sleep(5.0)
+        now = time.monotonic()
+        dt = max(0.001, now - last_t)
+        rate = (proto.total_rx - last_total) / dt
+        last_total = proto.total_rx
+        last_t = now
+
+        if proto.total_rx == 0:
+            print(f"  [heartbeat] no UDP packets received yet "
+                  f"-- is MSFS Bridge configured to broadcast to this machine?  "
+                  f"clients={len(hub.clients)}")
+            continue
+
+        srcs = ", ".join(
+            f"{ip}:{p}x{n}"
+            for (ip, p), n in sorted(proto.sources.items(), key=lambda kv: -kv[1])[:3]
+        )
+        last_fix = "--"
+        if proto.last_msg:
+            lm = proto.last_msg
+            if lm.get("alt_ft") is not None:
+                last_fix = f"{lm['lat']:.5f},{lm['lon']:.5f} alt={lm['alt_ft']} ft"
+            else:
+                last_fix = f"{lm['lat']:.5f},{lm['lon']:.5f}"
+        print(f"  [heartbeat] rx={proto.total_rx} parsed={proto.parsed} "
+              f"unparsed={proto.unparsed} rate={rate:.1f}/s "
+              f"ws_clients={len(hub.clients)}  senders=[{srcs}]  "
+              f"last_fix={last_fix}")
+
+
 async def main_async(args) -> None:
     hub = Hub()
     loop = asyncio.get_running_loop()
 
-    # UDP listener
-    transport, _ = await loop.create_datagram_endpoint(
-        lambda: UDPProto(hub, loop, args.verbose),
-        local_addr=("0.0.0.0", args.udp_port),
-        family=socket.AF_INET,
-        allow_broadcast=True,
-    )
-    print(f"UDP listening on 0.0.0.0:{args.udp_port}  (GDL90 / NMEA)")
+    proto_factory_holder = {"proto": None}
 
-    # WebSocket server
-    async with websockets.serve(
-        lambda ws: ws_handler(ws, hub),
-        args.ws_host, args.ws_port,
-        ping_interval=20, ping_timeout=20,
-    ) as _server:
-        print(f"WebSocket on ws://{args.ws_host}:{args.ws_port}")
-        print("Connect the simulator and start MSFS Bridge.")
-        try:
-            await asyncio.Future()  # run forever
-        finally:
-            transport.close()
+    def factory():
+        p = UDPProto(hub, loop, args.verbose, args.quiet)
+        proto_factory_holder["proto"] = p
+        return p
+
+    try:
+        transport, _ = await loop.create_datagram_endpoint(
+            factory,
+            local_addr=("0.0.0.0", args.udp_port),
+            family=socket.AF_INET,
+            allow_broadcast=True,
+        )
+    except OSError as e:
+        print(f"\nERROR: cannot bind UDP {args.udp_port}: {e}")
+        if getattr(e, "errno", None) in (48, 98, 10048):
+            print(f"       Port {args.udp_port} is already in use by another process.")
+            print(f"       Stop whatever's holding it (an old relay? another bridge")
+            print(f"       tool?) or run with --udp-port <other>.")
+        return
+
+    proto = proto_factory_holder["proto"]
+    print(f"UDP listening on 0.0.0.0:{args.udp_port}  (GDL90 / NMEA)")
+    print("  -> Configure MSFS Bridge to broadcast to this PC's IP on that port.")
+    print("  -> Bridge can be started before or after this relay.")
+
+    try:
+        ws_server = await websockets.serve(
+            lambda ws: ws_handler(ws, hub),
+            args.ws_host, args.ws_port,
+            ping_interval=20, ping_timeout=20,
+        )
+    except OSError as e:
+        print(f"\nERROR: cannot bind WebSocket {args.ws_host}:{args.ws_port}: {e}")
+        transport.close()
+        return
+
+    print(f"WebSocket on ws://{args.ws_host}:{args.ws_port}")
+    print("  -> In the simulator pick 'MSFS Bridge' with that URL.")
+    print()
+    print("Logging every received UDP datagram below. Heartbeat every 5 s.")
+    print("-" * 78)
+
+    hb_task = asyncio.create_task(heartbeat(proto, hub))
+    try:
+        await asyncio.Future()
+    finally:
+        hb_task.cancel()
+        ws_server.close()
+        await ws_server.wait_closed()
+        transport.close()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="MSFS Bridge UDP→WebSocket relay")
+    ap = argparse.ArgumentParser(description="MSFS Bridge UDP->WebSocket relay")
     ap.add_argument("--udp-port", type=int, default=4000,
                     help="UDP port to listen on (default 4000)")
     ap.add_argument("--ws-host", default="0.0.0.0",
                     help="WebSocket bind host (default 0.0.0.0)")
     ap.add_argument("--ws-port", type=int, default=9090,
                     help="WebSocket port (default 9090)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="Suppress per-packet logging (heartbeat only)")
     ap.add_argument("--verbose", action="store_true",
-                    help="Log every parsed packet")
+                    help="Extra detail per packet (full hex + ASCII preview)")
     args = ap.parse_args()
 
     try:
