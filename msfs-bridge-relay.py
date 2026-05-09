@@ -55,6 +55,19 @@ import socket
 import time
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+# Bump this on every meaningful change. Printed at startup so it's obvious
+# at a glance which copy is actually running.
+#
+#   0.4.0  Add __version__ + --version flag
+#   0.3.1  Strip NUL bytes from text datagrams (MSFS Bridge null-terminates)
+#   0.3.0  ForeFlight XGPS/XATT parser, default UDP port -> 49002
+#   0.2.0  Per-packet logging, heartbeat, port-in-use error reporting
+#   0.1.0  Initial relay (GDL90 + NMEA on UDP 4000)
+__version__ = "0.4.0"
+
 try:
     import websockets
 except ImportError:
@@ -522,6 +535,7 @@ async def main_async(args) -> None:
         return
 
     proto = proto_factory_holder["proto"]
+    print(f"msfs-bridge-relay  v{__version__}")
     print(f"UDP listening on 0.0.0.0:{args.udp_port}  (XGPS/XATT, GDL90, NMEA)")
     print("  -> Configure MSFS Bridge to broadcast to this PC's IP on that port.")
     print("  -> Bridge can be started before or after this relay.")
@@ -555,6 +569,8 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="MSFS Bridge UDP->WebSocket relay")
+    ap.add_argument("--version", action="version",
+                    version=f"msfs-bridge-relay {__version__}")
     ap.add_argument("--udp-port", type=int, default=49002,
                     help="UDP port to listen on (default 49002)")
     ap.add_argument("--ws-host", default="0.0.0.0",
