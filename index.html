@@ -506,22 +506,22 @@
 
   <div class="group" id="lnavGroup" style="display:none">
     <div class="glabel">Vertical Guidance — RNP LNAV</div>
-    <div class="seg compact" id="lnavVnavSeg">
-      <button data-v="LAT" class="on">Lateral only</button>
-      <button data-v="LNAVV">Lat + Adv VNAV</button>
-    </div>
-    <div id="vnavFields" style="display:none">
-      <div class="row">
-        <div class="field" id="f-mda">
-          <label>MDA / DA (ft MSL)</label>
-          <input type="number" id="mda" step="10" min="0" max="20000" value="500" inputmode="numeric">
-        </div>
-        <div class="field" id="f-mdaDist">
-          <label>MDA→Thr (NM)</label>
-          <input type="number" id="mdaDist" step="0.1" min="0" max="5" value="0.5" inputmode="decimal">
-        </div>
+    <div class="row">
+      <div class="field" id="f-lnav-angle">
+        <label>Path angle (°)</label>
+        <input type="number" id="lnavAngle" step="0.1" min="2.0" max="6.0" value="3.0" inputmode="decimal">
+        <div class="hint">typical 2.5 – 3.5</div>
       </div>
-      <div class="hint" id="vnavWarn" style="margin-top:4px"></div>
+      <div class="field" id="f-lnav-faMap">
+        <label>FAF → MAP (NM)</label>
+        <input type="number" id="lnavFaMapDist" step="0.1" min="0.1" max="20" value="4.71" inputmode="decimal">
+        <div class="hint">linked to angle</div>
+      </div>
+    </div>
+    <div class="field" id="f-mda">
+      <label>MDA (ft)</label>
+      <input type="number" id="mda" step="10" min="0" max="20000" value="500" inputmode="numeric">
+      <div class="hint">Minimum descent altitude (above threshold)</div>
     </div>
   </div>
 
@@ -680,6 +680,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.7.0  RNP LNAV: drop "lateral only", unify with ILS pattern (angle ↔ FAF→MAP, MDA)
      0.6.0  FAF→MAP input linked to GS angle; remove field elev; LNAV+V hides GS bar
      0.5.0  Source-aware platalt auto-fill (GPS or Bridge); "use current" button
      0.4.3  Fix LOC needle direction (was inverted — now points to centerline)
@@ -690,7 +691,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.6.0';
+const APP_VERSION = 'v0.7.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -798,7 +799,6 @@ function bindSeg(seg, cb) {
 }
 
 let apprType = 'ILS';        // 'ILS' | 'LNAV'
-let lnavMode = 'LAT';        // 'LAT' | 'LNAVV'
 let locSource = 'gps';       // 'gps' | 'bridge'
 
 bindSeg($('srcSeg'), v => {
@@ -808,37 +808,8 @@ bindSeg($('srcSeg'), v => {
 
 bindSeg($('apprTypeSeg'), v => {
   apprType = v;
-  $('ilsGroup').style.display  = (v === 'ILS') ? '' : 'none';
+  $('ilsGroup').style.display  = (v === 'ILS')  ? '' : 'none';
   $('lnavGroup').style.display = (v === 'LNAV') ? '' : 'none';
-  validateAdvisoryAngle();
-});
-bindSeg($('lnavVnavSeg'), v => {
-  lnavMode = v;
-  $('vnavFields').style.display = (v === 'LNAVV') ? '' : 'none';
-  validateAdvisoryAngle();
-});
-
-function validateAdvisoryAngle() {
-  const w = $('vnavWarn');
-  w.textContent = '';
-  w.style.color = '';
-  if (apprType !== 'LNAV' || lnavMode !== 'LNAVV') return;
-  // Path runs from threshold (alt 0) through (mdaDist, mda).
-  const mda = +$('mda').value;
-  const mdaDist = +$('mdaDist').value;
-  if (mdaDist <= 0) return;
-  const slope = mda / (mdaDist * FT_PER_NM);
-  const angle = Math.atan(slope) * RAD;
-  if (angle < 2.0 || angle > 4.0) {
-    w.textContent = `Advisory path ≈ ${angle.toFixed(2)}° (outside 2.0–4.0° — non-standard)`;
-    w.style.color = 'var(--warn)';
-  } else {
-    w.textContent = `Advisory path ≈ ${angle.toFixed(2)}°`;
-    w.style.color = 'var(--ink-dim)';
-  }
-}
-['platalt','dfaf','mda','mdaDist'].forEach(id => {
-  $(id).addEventListener('input', validateAdvisoryAngle);
 });
 
 // ----- ILS GS angle ↔ FAF→MAP distance, mutually dependent -----
@@ -888,17 +859,69 @@ $('faMapDist').addEventListener('input', () => {
   lastIlsEdit = 'famap';
   recomputeGsAngle();
 });
-$('platalt').addEventListener('input', () => {
-  if (ilsRecomputing) return;
-  syncIlsGeometry();
-});
 $('ilsDa').addEventListener('input', () => {
   if (ilsRecomputing) return;
   syncIlsGeometry();
 });
 
-// Initial sync so the default FAF→MAP matches the default GS / platAlt / DA.
+// ----- RNP LNAV path angle ↔ FAF→MAP distance, mutually dependent -----
+// Same pattern as ILS, but tied to MDA instead of DA.
+//    FAF→MAP (NM) = (platAlt − MDA) / tan(angle) / 6076
+//    angle (deg)  = atan((platAlt − MDA) / (FAF→MAP × 6076))
+let lastLnavEdit = 'angle';   // 'angle' | 'famap'
+let lnavRecomputing = false;
+
+function recomputeLnavFafMap() {
+  const platAlt = +$('platalt').value;
+  const mda     = +$('mda').value;
+  const angle   = +$('lnavAngle').value;
+  if (platAlt > mda && angle > 0) {
+    const distNM = (platAlt - mda) / Math.tan(angle * DEG) / FT_PER_NM;
+    lnavRecomputing = true;
+    $('lnavFaMapDist').value = distNM.toFixed(2);
+    lnavRecomputing = false;
+  }
+}
+function recomputeLnavAngle() {
+  const platAlt = +$('platalt').value;
+  const mda     = +$('mda').value;
+  const distNM  = +$('lnavFaMapDist').value;
+  if (platAlt > mda && distNM > 0) {
+    const angleDeg = Math.atan2(platAlt - mda, distNM * FT_PER_NM) * RAD;
+    lnavRecomputing = true;
+    $('lnavAngle').value = angleDeg.toFixed(2);
+    lnavRecomputing = false;
+  }
+}
+function syncLnavGeometry() {
+  if (lastLnavEdit === 'angle') recomputeLnavFafMap();
+  else recomputeLnavAngle();
+}
+$('lnavAngle').addEventListener('input', () => {
+  if (lnavRecomputing) return;
+  lastLnavEdit = 'angle';
+  recomputeLnavFafMap();
+});
+$('lnavFaMapDist').addEventListener('input', () => {
+  if (lnavRecomputing) return;
+  lastLnavEdit = 'famap';
+  recomputeLnavAngle();
+});
+$('mda').addEventListener('input', () => {
+  if (lnavRecomputing) return;
+  syncLnavGeometry();
+});
+
+// platalt drives BOTH groups — sync each so the inactive group stays consistent
+// for when the user toggles approach type.
+$('platalt').addEventListener('input', () => {
+  if (!ilsRecomputing) syncIlsGeometry();
+  if (!lnavRecomputing) syncLnavGeometry();
+});
+
+// Initial sync so the defaults agree.
 syncIlsGeometry();
+syncLnavGeometry();
 
 // Track whether the user has manually edited the platform altitude, so we
 // don't override their value when auto-fill fires.
@@ -975,9 +998,9 @@ async function autoFillPlatAlt(force = false) {
   if (r.ok) {
     $('platalt').value = Math.round(r.altFt / 10) * 10;
     platAltUserEdited = false; // fresh auto-fill — allow re-trigger
-    validateAdvisoryAngle();
-    // Keep the GS angle ↔ FAF→MAP relationship consistent with the new platalt.
-    if (apprType === 'ILS') syncIlsGeometry();
+    // Keep the angle ↔ FAF→MAP relationship consistent in both groups.
+    syncIlsGeometry();
+    syncLnavGeometry();
   }
   return r;
 }
@@ -1020,14 +1043,17 @@ $('bridgeUrl').addEventListener('input', () => {
 function readSetupValues() {
   const v = {
     apprType,
-    lnavMode,
     dfaf: +$('dfaf').value,
     platAlt: +$('platalt').value,
+    // ILS
     gsAngle: +$('gsAngle').value,
     faMapDist: +$('faMapDist').value,
     ilsDa: +$('ilsDa').value,
+    // RNP LNAV
+    lnavAngle: +$('lnavAngle').value,
+    lnavFaMapDist: +$('lnavFaMapDist').value,
     mda: +$('mda').value,
-    mdaDist: +$('mdaDist').value,
+    // shared
     course: $('course').value === '' ? null : +$('course').value,
     fieldElev: 0,   // field elevation removed from UI; treated as 0 internally
   };
@@ -1049,9 +1075,10 @@ function validateSetup() {
     mark('f-gs',    !(v.gsAngle  >= 2.0 && v.gsAngle  <= 6.0), 'GS angle 2.0–6.0');
     mark('f-faMap', !(v.faMapDist > 0   && v.faMapDist <= 20), 'FAF→MAP 0.1–20');
     mark('f-ilsDa', !(v.ilsDa    >= 0   && v.ilsDa    <= 20000), 'DA 0–20000');
-  } else if (v.lnavMode === 'LNAVV') {
-    mark('f-mda',     !(v.mda >= 0 && v.mda <= 20000), 'MDA 0–20000');
-    mark('f-mdaDist', !(v.mdaDist > 0 && v.mdaDist <= 5), 'MDA→Thr 0–5');
+  } else if (v.apprType === 'LNAV') {
+    mark('f-lnav-angle', !(v.lnavAngle  >= 2.0 && v.lnavAngle  <= 6.0), 'Path angle 2.0–6.0');
+    mark('f-lnav-faMap', !(v.lnavFaMapDist > 0 && v.lnavFaMapDist <= 20), 'FAF→MAP 0.1–20');
+    mark('f-mda',        !(v.mda    >= 0 && v.mda    <= 20000), 'MDA 0–20000');
   }
   if (v.course !== null) {
     mark('f-course', !(v.course >= 1 && v.course <= 360), 'Course 1–360');
@@ -1275,26 +1302,16 @@ function beginSimulation(cfg) {
 }
 
 function finalizeStartup() {
-  // virtual geometry
+  // virtual geometry — both ILS and RNP LNAV define the path by angle and a
+  // distance, with the threshold at altitude 0. FAF is at platAlt above the
+  // threshold along the path.
   const c = Sim.cfg;
   Sim.dFafNM = c.dfaf;
-  if (c.apprType === 'ILS') {
-    // distance from threshold to FAF along the path: (platAlt - fieldElev) / tan(GS) feet
-    const altDelta = Math.max(0, c.platAlt - c.fieldElev);
-    const distFromThrToFafFt = altDelta / Math.tan(c.gsAngle * DEG);
-    Sim.dThrNM = c.dfaf + distFromThrToFafFt / FT_PER_NM;
-  } else if (c.lnavMode === 'LNAVV') {
-    // path slope from advisory geometry
-    const slopeFtPerFt = (c.mda - c.fieldElev) / (c.mdaDist * FT_PER_NM);
-    const angleRad = Math.atan(slopeFtPerFt);
-    const altDelta = Math.max(0, c.platAlt - c.fieldElev);
-    const distFromThrToFafFt = (slopeFtPerFt > 0) ? (altDelta / Math.tan(angleRad)) : (c.dfaf + 1) * FT_PER_NM;
-    Sim.dThrNM = c.dfaf + distFromThrToFafFt / FT_PER_NM;
-    Sim.advisoryAngleDeg = angleRad * RAD;
-  } else {
-    // LNAV-only nominal
-    Sim.dThrNM = c.dfaf + 1.0;
-  }
+  const angleDeg = (c.apprType === 'ILS') ? c.gsAngle : c.lnavAngle;
+  const altDelta = Math.max(0, c.platAlt - c.fieldElev);
+  const distFromThrToFafFt = altDelta / Math.tan(angleDeg * DEG);
+  Sim.dThrNM = c.dfaf + distFromThrToFafFt / FT_PER_NM;
+  Sim.pathAngleDeg = angleDeg;
 
   // configure UI
   configureSimUI();
@@ -1313,12 +1330,8 @@ function finalizeStartup() {
 /* configure mode-dependent UI bits */
 function configureSimUI() {
   const c = Sim.cfg;
-  let modeText = 'ILS';
-  let advText = '';
-  if (c.apprType === 'LNAV') {
-    if (c.lnavMode === 'LNAVV') { modeText = 'LNAV+V'; advText = 'ADV'; }
-    else modeText = 'LNAV';
-  }
+  const modeText = (c.apprType === 'ILS') ? 'ILS' : 'RNP LNAV';
+  const advText  = (c.apprType === 'LNAV') ? 'ADV' : '';
   $('modeTag').textContent = modeText;
   $('cdiModeLbl').textContent = modeText;
   $('cdiAdvLbl').textContent = advText;
@@ -1436,14 +1449,13 @@ function render() {
 
   // --- altitude / vertical ---
   let curAltFt, idealAltFt, vertDef = 0, vertPegged = false;
-  let hasVert = (c.apprType === 'ILS') || (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV');
-  // Ideal altitude on path at along-track distance from threshold
-  // distance from threshold (NM) — must be >=0 for path; clamp at 0 past thr
+  // Both ILS and RNP LNAV always have vertical guidance — kept as a flag in
+  // case future approach types don't.
+  const hasVert = (c.apprType === 'ILS') || (c.apprType === 'LNAV');
+  // Ideal altitude on path at along-track distance from threshold.
+  // distance from threshold (NM) — must be >= 0 for path; clamp at 0 past thr.
   const distFromThrNMForPath = Math.max(0, distThrNM);
-  let pathAngleDeg;
-  if (c.apprType === 'ILS') pathAngleDeg = c.gsAngle;
-  else if (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV') pathAngleDeg = Sim.advisoryAngleDeg || 3.0;
-  else pathAngleDeg = 3.0; // for cosmetic ideal (LNAV-only)
+  const pathAngleDeg = (c.apprType === 'ILS') ? c.gsAngle : c.lnavAngle;
 
   idealAltFt = c.fieldElev + distFromThrNMForPath * FT_PER_NM * Math.tan(pathAngleDeg * DEG);
 
@@ -1580,12 +1592,8 @@ function render() {
   }
 
   // Step-down: target altitude at the next whole-NM crossing toward threshold.
-  // For ILS / LNAV+V this follows the GS / advisory path. For LNAV-only we
-  // generate a 3° reference so the pilot still has a profile to fly.
-  const stepAngleDeg = (c.apprType === 'ILS') ? c.gsAngle
-                     : (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV')
-                         ? (Sim.advisoryAngleDeg || 3.0)
-                         : 3.0;  // LNAV-only fallback profile
+  // Same path angle as the GS/advisory path used elsewhere.
+  const stepAngleDeg = pathAngleDeg;
   let nextStepNM = null;
   let nextStepAlt = null;
   let stepDelta = null;
@@ -1630,22 +1638,12 @@ function render() {
     if (Sim.locSource === 'gps' && acc > 15) lab.classList.add('warn'); else lab.classList.remove('warn');
   }
 
-  // MINIMUMS banner.
-  //   ILS:    triggers when curAlt drops below DA on the inbound segment.
-  //   LNAV+V: triggers when distance-to-threshold reaches the configured MDA point.
-  //   LNAV:   uses the same MDA value but distance proxy of mdaDist (0.5 NM default).
+  // MINIMUMS banner — fires when current altitude descends through DA/MDA
+  // on the inbound segment. Uses the user-input minimum for both modes.
+  const minimum = (c.apprType === 'ILS') ? c.ilsDa : c.mda;
   let mdaBannerOn = false;
-  if (c.apprType === 'ILS') {
-    if (distFafNM <= 0 && distThrNM > -0.3 && curAltFt <= c.ilsDa) {
-      mdaBannerOn = true;
-    }
-  } else if (c.apprType === 'LNAV') {
-    if (c.lnavMode === 'LNAVV') {
-      if (distThrNM <= c.mdaDist && distThrNM > -0.3) mdaBannerOn = true;
-    } else {
-      // LNAV-only: nominal 0.5 NM from threshold as MDA proxy
-      if (distThrNM <= 0.5 && distThrNM > -0.3) mdaBannerOn = true;
-    }
+  if (distFafNM <= 0 && distThrNM > -0.3 && curAltFt <= minimum) {
+    mdaBannerOn = true;
   }
   $('minBanner').classList.toggle('show', mdaBannerOn);
 
