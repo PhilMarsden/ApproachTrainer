@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0a">
+<title>ILS / RNP LNAV Approach Simulator</title>
+<style>
+  /* ============================================================
+     Instrument Approach Simulator
+     Single-file vanilla HTML/CSS/JS app
+     ============================================================ */
+
+  :root {
+    --bg: #0a0a0a;
+    --panel: #161616;
+    --panel-hi: #1f1f1f;
+    --line: #2a2a2a;
+    --ink: #d8d8d8;
+    --ink-dim: #8a8a8a;
+    --amber: #ffb000;
+    --green: #00e070;
+    --red: #ff3838;
+    --blue: #4cc9f0;
+    --warn: #ff8b00;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+  body {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  button { font-family: inherit; }
+  input, select { font-family: inherit; }
+
+  .screen { display: none; flex: 1; flex-direction: column; }
+  .screen.active { display: flex; }
+
+  /* --------- Setup screen --------- */
+  #setup {
+    padding: 20px 18px 28px;
+    max-width: 560px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  #setup h1 {
+    font-size: 18px;
+    letter-spacing: 0.08em;
+    margin: 4px 0 4px;
+    color: var(--amber);
+    text-transform: uppercase;
+  }
+  #setup .sub {
+    font-size: 12px;
+    color: var(--ink-dim);
+    margin-bottom: 18px;
+    line-height: 1.4;
+  }
+  .disclaimer {
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    padding: 8px 10px;
+    font-size: 12px;
+    margin: 10px 0 18px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .group {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 14px 6px;
+    margin-bottom: 14px;
+  }
+  .group .glabel {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: 10px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 12px;
+  }
+  .field label {
+    font-size: 12px;
+    color: var(--ink-dim);
+    margin-bottom: 4px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .field input[type="number"], .field input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-size: 18px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    min-height: 44px;
+    width: 100%;
+  }
+  .field input:focus {
+    outline: none;
+    border-color: var(--amber);
+  }
+  .field .hint {
+    font-size: 11px;
+    color: var(--ink-dim);
+    margin-top: 4px;
+  }
+  .field.invalid input { border-color: var(--red); }
+  .field.invalid .hint { color: var(--red); }
+
+  /* segmented toggle */
+  .seg {
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 12px;
+  }
+  .seg button {
+    flex: 1;
+    background: var(--panel-hi);
+    color: var(--ink-dim);
+    border: none;
+    padding: 12px 8px;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  .seg button.on {
+    background: var(--amber);
+    color: #000;
+    font-weight: 600;
+  }
+  .seg.compact button { padding: 8px; font-size: 12px; }
+
+  .row { display: flex; gap: 10px; }
+  .row .field { flex: 1; }
+
+  #goBtn {
+    width: 100%;
+    background: var(--green);
+    color: #000;
+    border: none;
+    padding: 16px;
+    font-size: 16px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 700;
+    border-radius: 6px;
+    min-height: 56px;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  #goBtn:disabled { background: #2a2a2a; color: #666; cursor: not-allowed; }
+  #goBtn.loading { background: var(--amber); }
+
+  #setupError {
+    display: none;
+    color: var(--red);
+    border: 1px solid var(--red);
+    padding: 8px 10px;
+    margin: 10px 0;
+    font-size: 13px;
+    border-radius: 4px;
+  }
+  #setupError.show { display: block; }
+  #setupError button {
+    margin-top: 6px;
+    background: transparent;
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 6px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  /* --------- Simulation screen --------- */
+  #sim {
+    padding: 8px 10px 12px;
+    gap: 8px;
+  }
+  .sim-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .sim-top .mode-tag {
+    color: var(--amber);
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .sim-top .course-tag .v {
+    color: var(--green);
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .sim-top .lock { color: var(--ink-dim); }
+  .sim-top .lock.warn { color: var(--red); }
+
+  .sim-main {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .cdi-wrap {
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    aspect-ratio: 1 / 1;
+    max-height: 60vh;
+  }
+  .cdi-wrap svg { width: 100%; height: 100%; display: block; }
+
+  .readouts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .readout {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px 10px;
+    min-height: 56px;
+  }
+  .readout .lbl {
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .readout .val {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--green);
+    line-height: 1.1;
+    margin-top: 2px;
+  }
+  .readout .val.amber { color: var(--amber); }
+  .readout .val.dim { color: var(--ink-dim); }
+  .readout .sub {
+    font-size: 11px;
+    color: var(--ink-dim);
+    margin-top: 2px;
+  }
+
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .controls button {
+    flex: 1;
+    background: var(--panel-hi);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 10px 8px;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    min-height: 48px;
+    cursor: pointer;
+  }
+  .controls button.primary { color: var(--amber); border-color: var(--amber); }
+  .controls button.warn { color: var(--red); border-color: var(--red); }
+  .controls button.on { background: var(--amber); color: #000; }
+
+  .vmode-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .vmode-row .lbl {
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-right: 4px;
+  }
+  .vmode-row .seg { margin: 0; flex: 1; min-width: 0; }
+  .vmode-row .seg button {
+    padding: 8px 4px;
+    font-size: 11px;
+    min-height: 36px;
+    background: var(--panel);
+  }
+  .vmode-row .seg button.on { background: var(--amber); color: #000; }
+
+  .nudge {
+    display: none;
+    gap: 6px;
+  }
+  .nudge.show { display: flex; }
+  .nudge button {
+    flex: 1;
+    background: var(--panel-hi);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    min-height: 44px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .banner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.78);
+    border: 2px solid var(--red);
+    color: var(--red);
+    padding: 10px 18px;
+    font-size: 18px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 700;
+    border-radius: 6px;
+    pointer-events: none;
+    text-align: center;
+    display: none;
+  }
+  .banner.show { display: block; animation: flash 0.9s infinite; }
+  @keyframes flash { 0%,49% { opacity: 1; } 50%,100% { opacity: 0.35; } }
+
+  .end-banner {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    color: var(--amber);
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 14px;
+    border-radius: 6px;
+    text-align: center;
+    padding: 18px;
+  }
+  .end-banner.show { display: flex; }
+  .end-banner .big {
+    font-size: 22px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .end-banner button {
+    background: var(--green);
+    border: none;
+    color: #000;
+    padding: 12px 22px;
+    border-radius: 4px;
+    font-size: 14px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  /* needles transition */
+  .needle, .gs-needle, .lat-bar, .gs-bar {
+    transition: transform 220ms ease-out;
+  }
+
+  /* desktop tweaks */
+  @media (min-width: 720px) {
+    .sim-main {
+      grid-template-columns: 1.2fr 1fr;
+    }
+    .cdi-wrap { max-height: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- =========================================================
+     SETUP SCREEN
+     ========================================================= -->
+<section id="setup" class="screen active">
+  <h1>Approach Simulator</h1>
+  <div class="sub">Walk a simulated ILS or RNP LNAV approach. Your real-world walking maps onto the final-approach segment.</div>
+  <div class="disclaimer">Training simulation only. Not for navigation.</div>
+
+  <div class="group">
+    <div class="glabel">Approach Type</div>
+    <div class="seg" id="apprTypeSeg">
+      <button data-v="ILS" class="on">ILS</button>
+      <button data-v="LNAV">RNP LNAV</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="glabel">Geometry</div>
+    <div class="row">
+      <div class="field" id="f-dfaf">
+        <label>Distance from FAF (NM)</label>
+        <input type="number" id="dfaf" step="0.1" min="0.5" max="15" value="5.0" inputmode="decimal">
+        <div class="hint">Range 0.5 – 15</div>
+      </div>
+      <div class="field" id="f-platalt">
+        <label>Platform Alt (ft MSL)</label>
+        <input type="number" id="platalt" step="100" min="0" max="20000" value="2000" inputmode="numeric">
+        <div class="hint">Altitude at FAF</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="group" id="ilsGroup">
+    <div class="glabel">Vertical Guidance — ILS</div>
+    <div class="field" id="f-gs">
+      <label>Glideslope angle (°)</label>
+      <input type="number" id="gsAngle" step="0.1" min="2.5" max="3.5" value="3.0" inputmode="decimal">
+      <div class="hint">Range 2.5 – 3.5</div>
+    </div>
+  </div>
+
+  <div class="group" id="lnavGroup" style="display:none">
+    <div class="glabel">Vertical Guidance — RNP LNAV</div>
+    <div class="seg compact" id="lnavVnavSeg">
+      <button data-v="LAT" class="on">Lateral only</button>
+      <button data-v="LNAVV">Lat + Adv VNAV</button>
+    </div>
+    <div id="vnavFields" style="display:none">
+      <div class="row">
+        <div class="field" id="f-mda">
+          <label>MDA / DA (ft MSL)</label>
+          <input type="number" id="mda" step="10" min="0" max="20000" value="500" inputmode="numeric">
+        </div>
+        <div class="field" id="f-mdaDist">
+          <label>MDA→Thr (NM)</label>
+          <input type="number" id="mdaDist" step="0.1" min="0" max="5" value="0.5" inputmode="decimal">
+        </div>
+      </div>
+      <div class="hint" id="vnavWarn" style="margin-top:4px"></div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="glabel">Course &amp; Field</div>
+    <div class="row">
+      <div class="field" id="f-course">
+        <label>Approach course (°M)</label>
+        <input type="number" id="course" step="1" min="1" max="360" placeholder="auto" inputmode="numeric">
+        <div class="hint">Blank = use device heading</div>
+      </div>
+      <div class="field" id="f-field">
+        <label>Field elev (ft MSL)</label>
+        <input type="number" id="fieldElev" step="10" value="0" inputmode="numeric">
+        <div class="hint">Optional</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="setupError"></div>
+  <button id="goBtn">GO</button>
+</section>
+
+<!-- =========================================================
+     SIMULATION SCREEN
+     ========================================================= -->
+<section id="sim" class="screen">
+  <div class="sim-top">
+    <div class="mode-tag" id="modeTag">ILS</div>
+    <div class="course-tag">CRS <span class="v" id="courseTag">000°</span></div>
+    <div class="lock" id="gpsTag">GPS …</div>
+  </div>
+
+  <div class="sim-main">
+    <div class="cdi-wrap">
+      <!-- T-bar CDI SVG -->
+      <svg viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg" id="cdi">
+        <defs>
+          <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#0c0c0c"/>
+            <stop offset="1" stop-color="#000"/>
+          </linearGradient>
+        </defs>
+        <!-- bezel -->
+        <circle cx="0" cy="0" r="96" fill="url(#bgGrad)" stroke="#333" stroke-width="1.2"/>
+        <!-- inner ring -->
+        <circle cx="0" cy="0" r="84" fill="none" stroke="#1a1a1a" stroke-width="0.5"/>
+
+        <!-- horizontal scale (lateral dots) -->
+        <g id="latScale">
+          <circle cx="-40" cy="0" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="-20" cy="0" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="20" cy="0" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="40" cy="0" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+        </g>
+        <!-- vertical scale (GS dots) -->
+        <g id="gsScale">
+          <circle cx="0" cy="-40" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="0" cy="-20" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="0" cy="20" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+          <circle cx="0" cy="40" r="3" fill="none" stroke="#666" stroke-width="1.2"/>
+        </g>
+        <!-- centre cross -->
+        <line x1="-8" y1="0" x2="8" y2="0" stroke="#888" stroke-width="0.8"/>
+        <line x1="0" y1="-8" x2="0" y2="8" stroke="#888" stroke-width="0.8"/>
+        <circle cx="0" cy="0" r="2.4" fill="#888"/>
+
+        <!-- TO/FROM triangle -->
+        <polygon id="toFromArrow" points="0,-58 -5,-50 5,-50" fill="#00e070"/>
+        <text x="0" y="-66" text-anchor="middle" font-size="7" fill="#00e070" font-family="ui-monospace,monospace" id="toFromText">TO</text>
+
+        <!-- vertical (lateral) needle -->
+        <line id="latNeedle" class="needle" x1="0" y1="-60" x2="0" y2="60" stroke="#00e070" stroke-width="3.2" stroke-linecap="round" transform="translate(0,0)"/>
+
+        <!-- horizontal (glideslope) needle -->
+        <line id="gsNeedle" class="gs-needle" x1="-60" y1="0" x2="60" y2="0" stroke="#00e070" stroke-width="3.2" stroke-linecap="round" transform="translate(0,0)"/>
+
+        <!-- Mode label inside bezel -->
+        <text x="-86" y="-78" font-size="7" fill="#ffb000" font-family="ui-monospace,monospace" id="cdiModeLbl">ILS</text>
+        <text x="86" y="-78" text-anchor="end" font-size="7" fill="#ffb000" font-family="ui-monospace,monospace" id="cdiAdvLbl"></text>
+      </svg>
+
+      <div class="banner" id="minBanner">MINIMUMS — DECIDE</div>
+      <div class="end-banner" id="endBanner">
+        <div class="big" id="endBannerTxt">GO AROUND / TOUCHDOWN</div>
+        <button id="endResetBtn">Reset</button>
+      </div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      <div class="readouts">
+        <div class="readout">
+          <div class="lbl">Dist FAF</div>
+          <div class="val" id="rDistFaf">— NM</div>
+          <div class="sub" id="rDistFafSub"></div>
+        </div>
+        <div class="readout">
+          <div class="lbl">Dist Thr</div>
+          <div class="val" id="rDistThr">— NM</div>
+          <div class="sub" id="rDistThrSub"></div>
+        </div>
+        <div class="readout">
+          <div class="lbl">Cur Alt</div>
+          <div class="val" id="rCurAlt">— ft</div>
+          <div class="sub" id="rCurAltSub"></div>
+        </div>
+        <div class="readout">
+          <div class="lbl">Tgt Alt</div>
+          <div class="val amber" id="rTgtAlt">— ft</div>
+          <div class="sub" id="rTgtAltSub">Δ — ft</div>
+        </div>
+      </div>
+
+      <div class="vmode-row">
+        <span class="lbl">Vert</span>
+        <div class="seg" id="vModeSeg">
+          <button data-v="auto" class="on">Auto</button>
+          <button data-v="gps">GPS</button>
+          <button data-v="manual">Manual</button>
+        </div>
+      </div>
+
+      <div class="nudge" id="nudgeRow">
+        <button id="nudgeUp">+25 ft (fly UP)</button>
+        <button id="nudgeDn">−25 ft (fly DN)</button>
+      </div>
+
+      <div class="controls">
+        <button id="pauseBtn" class="primary">Pause</button>
+        <button id="lockBtn" title="Lock centerline to walked track" style="display:none">Lock Track</button>
+        <button id="resetBtn" class="warn">Reset</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+/* ===========================================================
+   Constants &amp; conversions
+   =========================================================== */
+const M_PER_NM = 1852;
+const FT_PER_NM = 6076.115485564304;
+const FT_PER_M = 3.28083989501312;
+const DEG = Math.PI / 180;
+const RAD = 180 / Math.PI;
+const R_EARTH = 6371008.8; // metres, mean Earth radius
+
+/* ===========================================================
+   Geometry helpers (Aviation Formulary / Movable Type)
+   =========================================================== */
+
+/** Great-circle distance between two lat/lon points, in metres. */
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const φ1 = lat1 * DEG, φ2 = lat2 * DEG;
+  const Δφ = (lat2 - lat1) * DEG;
+  const Δλ = (lon2 - lon1) * DEG;
+  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+  return 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+/** Initial bearing from p1 to p2, in degrees [0,360). */
+function initialBearing(lat1, lon1, lat2, lon2) {
+  const φ1 = lat1 * DEG, φ2 = lat2 * DEG;
+  const Δλ = (lon2 - lon1) * DEG;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(Δλ);
+  return ((Math.atan2(y, x) * RAD) + 360) % 360;
+}
+
+/** Destination point given starting point, bearing (deg), distance (m). */
+function destinationPoint(lat, lon, bearingDeg, distM) {
+  const δ = distM / R_EARTH;
+  const θ = bearingDeg * DEG;
+  const φ1 = lat * DEG, λ1 = lon * DEG;
+  const φ2 = Math.asin(Math.sin(φ1)*Math.cos(δ) + Math.cos(φ1)*Math.sin(δ)*Math.cos(θ));
+  const λ2 = λ1 + Math.atan2(Math.sin(θ)*Math.sin(δ)*Math.cos(φ1),
+                              Math.cos(δ) - Math.sin(φ1)*Math.sin(φ2));
+  return { lat: φ2 * RAD, lon: ((λ2 * RAD + 540) % 360) - 180 };
+}
+
+/**
+ * Signed cross-track distance (metres) of point (lat,lon) from the great
+ * circle through (lat1,lon1) on initial bearing brng (deg).
+ * Positive = right of track (when facing along the bearing).
+ */
+function crossTrackDistance(lat, lon, lat1, lon1, brng) {
+  const δ13 = haversineDistance(lat1, lon1, lat, lon) / R_EARTH;
+  const θ13 = initialBearing(lat1, lon1, lat, lon) * DEG;
+  const θ12 = brng * DEG;
+  return Math.asin(Math.sin(δ13) * Math.sin(θ13 - θ12)) * R_EARTH;
+}
+
+/**
+ * Signed along-track distance (metres) from (lat1,lon1) to the projection
+ * of (lat,lon) onto the great circle on bearing brng.
+ * Positive = forward along the bearing.
+ */
+function alongTrackDistance(lat, lon, lat1, lon1, brng) {
+  const δ13 = haversineDistance(lat1, lon1, lat, lon) / R_EARTH;
+  const dxt = crossTrackDistance(lat, lon, lat1, lon1, brng) / R_EARTH;
+  // numerical safety — the input to acos must be in [-1,1]
+  const c = Math.cos(δ13) / Math.cos(dxt);
+  const δat = Math.acos(Math.max(-1, Math.min(1, c)));
+  // sign: dot product of bearing vector with displacement direction
+  const θ13 = initialBearing(lat1, lon1, lat, lon) * DEG;
+  const dθ = ((θ13 - brng * DEG + Math.PI*3) % (Math.PI*2)) - Math.PI;
+  const sign = Math.abs(dθ) < Math.PI/2 ? 1 : -1;
+  return δat * R_EARTH * sign;
+}
+
+/* ===========================================================
+   Setup screen logic
+   =========================================================== */
+
+const $ = (id) => document.getElementById(id);
+const setup = $('setup');
+const sim = $('sim');
+
+// segmented controls
+function bindSeg(seg, cb) {
+  seg.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      seg.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      cb(btn.dataset.v);
+    });
+  });
+}
+
+let apprType = 'ILS';        // 'ILS' | 'LNAV'
+let lnavMode = 'LAT';        // 'LAT' | 'LNAVV'
+
+bindSeg($('apprTypeSeg'), v => {
+  apprType = v;
+  $('ilsGroup').style.display  = (v === 'ILS') ? '' : 'none';
+  $('lnavGroup').style.display = (v === 'LNAV') ? '' : 'none';
+  validateAdvisoryAngle();
+});
+bindSeg($('lnavVnavSeg'), v => {
+  lnavMode = v;
+  $('vnavFields').style.display = (v === 'LNAVV') ? '' : 'none';
+  validateAdvisoryAngle();
+});
+
+function validateAdvisoryAngle() {
+  const w = $('vnavWarn');
+  w.textContent = '';
+  w.style.color = '';
+  if (apprType !== 'LNAV' || lnavMode !== 'LNAVV') return;
+  const platAlt = +$('platalt').value;
+  const fld = +$('fieldElev').value || 0;
+  const dfaf = +$('dfaf').value;
+  const mda = +$('mda').value;
+  const mdaDist = +$('mdaDist').value;
+  // path: from threshold (alt = field) through (mdaDist, mda) — angle:
+  // altitude at FAF inferred = field + (dfaf+(mdaDist would be subtracted? no)
+  // Path slope from (0, field) to (mdaDist, mda): rise/run.
+  if (mdaDist <= 0) return;
+  const slope = (mda - fld) / (mdaDist * FT_PER_NM);
+  const angle = Math.atan(slope) * RAD;
+  if (angle < 2.0 || angle > 4.0) {
+    w.textContent = `Advisory path ≈ ${angle.toFixed(2)}° (outside 2.0–4.0° — non-standard)`;
+    w.style.color = 'var(--warn)';
+  } else {
+    w.textContent = `Advisory path ≈ ${angle.toFixed(2)}°`;
+    w.style.color = 'var(--ink-dim)';
+  }
+}
+['platalt','fieldElev','dfaf','mda','mdaDist'].forEach(id => {
+  $(id).addEventListener('input', validateAdvisoryAngle);
+});
+
+function readSetupValues() {
+  const v = {
+    apprType,
+    lnavMode,
+    dfaf: +$('dfaf').value,
+    platAlt: +$('platalt').value,
+    gsAngle: +$('gsAngle').value,
+    mda: +$('mda').value,
+    mdaDist: +$('mdaDist').value,
+    course: $('course').value === '' ? null : +$('course').value,
+    fieldElev: +$('fieldElev').value || 0,
+  };
+  return v;
+}
+
+function validateSetup() {
+  let ok = true;
+  const errs = [];
+  const mark = (fid, bad, msg) => {
+    const el = $(fid);
+    if (bad) { el.classList.add('invalid'); errs.push(msg); ok = false; }
+    else el.classList.remove('invalid');
+  };
+  const v = readSetupValues();
+  mark('f-dfaf',   !(v.dfaf >= 0.5 && v.dfaf <= 15), 'Distance from FAF 0.5–15');
+  mark('f-platalt',!(v.platAlt >= 0 && v.platAlt <= 20000), 'Platform altitude 0–20000');
+  if (v.apprType === 'ILS') {
+    mark('f-gs', !(v.gsAngle >= 2.5 && v.gsAngle <= 3.5), 'GS angle 2.5–3.5');
+  } else if (v.lnavMode === 'LNAVV') {
+    mark('f-mda',     !(v.mda >= 0 && v.mda <= 20000), 'MDA 0–20000');
+    mark('f-mdaDist', !(v.mdaDist > 0 && v.mdaDist <= 5), 'MDA→Thr 0–5');
+  }
+  if (v.course !== null) {
+    mark('f-course', !(v.course >= 1 && v.course <= 360), 'Course 1–360');
+  }
+  return { ok, errs, v };
+}
+
+const goBtn = $('goBtn');
+const setupErr = $('setupError');
+
+function showError(html) {
+  setupErr.innerHTML = html;
+  setupErr.classList.add('show');
+}
+function clearError() { setupErr.classList.remove('show'); setupErr.innerHTML = ''; }
+
+goBtn.addEventListener('click', () => {
+  clearError();
+  const r = validateSetup();
+  if (!r.ok) {
+    showError('Please fix: ' + r.errs.join('; '));
+    return;
+  }
+  beginSimulation(r.v);
+});
+
+/* ===========================================================
+   Simulation state
+   =========================================================== */
+
+const Sim = {
+  // setup snapshot
+  cfg: null,
+  // anchor: lat/lon recorded at Go
+  lat0: null, lon0: null,
+  course: null,
+  // virtual feature distances (NM from anchor along course)
+  dFafNM: null,
+  dThrNM: null,
+  // GPS
+  watchId: null,
+  lastFix: null,
+  smooth: [],   // moving average for lat/lon
+  altSmooth: [],
+  // track lock candidate
+  walkedM: 0,
+  trackLocked: false,
+  // state
+  paused: false,
+  ended: false,
+  // manual nudge
+  manualOffset: 0,
+  manualDecayLast: null,
+  // animation
+  rafId: null,
+};
+
+let wakeLockSentinel = null;
+async function tryWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel.addEventListener('release', () => {});
+    }
+  } catch (e) { /* ignore */ }
+}
+function releaseWakeLock() {
+  try { wakeLockSentinel && wakeLockSentinel.release(); } catch(e){}
+  wakeLockSentinel = null;
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Sim.watchId !== null) tryWakeLock();
+});
+
+/* ----- compass heading attempt ----- */
+let compassHeading = null;
+let compassListenerArmed = false;
+function armCompass() {
+  if (compassListenerArmed) return;
+  compassListenerArmed = true;
+  function onOrient(e) {
+    let h = null;
+    if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;
+    else if (e.absolute && typeof e.alpha === 'number') h = (360 - e.alpha) % 360;
+    if (h !== null && !isNaN(h)) compassHeading = h;
+  }
+  window.addEventListener('deviceorientationabsolute', onOrient, true);
+  window.addEventListener('deviceorientation', onOrient, true);
+}
+armCompass();
+
+/* ----- core: begin simulation ----- */
+function beginSimulation(cfg) {
+  Sim.cfg = cfg;
+  Sim.smooth = [];
+  Sim.altSmooth = [];
+  Sim.walkedM = 0;
+  Sim.trackLocked = false;
+  Sim.paused = false;
+  Sim.ended = false;
+  Sim.manualOffset = 0;
+  Sim.manualDecayLast = null;
+
+  if (!('geolocation' in navigator)) {
+    showError('GPS is not available in this browser.');
+    return;
+  }
+
+  // Request iOS permission for orientation if available — best effort.
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().catch(()=>{});
+  }
+
+  goBtn.disabled = true;
+  goBtn.classList.add('loading');
+  goBtn.textContent = 'Acquiring GPS…';
+
+  let acquired = false;
+  const timeoutId = setTimeout(() => {
+    if (acquired) return;
+    if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
+    Sim.watchId = null;
+    goBtn.disabled = false;
+    goBtn.classList.remove('loading');
+    goBtn.textContent = 'GO';
+    showError(`No GPS fix within 10 s. <br>
+      <button onclick="document.getElementById('setupError').classList.remove('show')">Try again</button>`);
+  }, 10000);
+
+  const onFirst = (pos) => {
+    if (acquired) return;
+    acquired = true;
+    clearTimeout(timeoutId);
+    Sim.lat0 = pos.coords.latitude;
+    Sim.lon0 = pos.coords.longitude;
+
+    // resolve course
+    if (cfg.course !== null) {
+      Sim.course = cfg.course;
+    } else if (compassHeading !== null) {
+      Sim.course = compassHeading;
+    } else {
+      // fallback: use 0° and we'll lock from track once moved
+      Sim.course = 0;
+    }
+    finalizeStartup();
+    // from now on, this same watch keeps streaming via onUpdate
+  };
+
+  const onError = (err) => {
+    if (acquired) return; // running watch handles errors otherwise
+    clearTimeout(timeoutId);
+    if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
+    Sim.watchId = null;
+    goBtn.disabled = false;
+    goBtn.classList.remove('loading');
+    goBtn.textContent = 'GO';
+    let msg = 'GPS error.';
+    if (err.code === 1) msg = 'GPS permission denied.';
+    else if (err.code === 2) msg = 'GPS position unavailable.';
+    else if (err.code === 3) msg = 'GPS request timed out.';
+    showError(`${msg} <br>
+      <button onclick="document.getElementById('setupError').classList.remove('show')">Try again</button>`);
+  };
+
+  Sim.watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      if (!acquired) onFirst(pos);
+      else onUpdate(pos);
+    },
+    onError,
+    { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+  );
+}
+
+function finalizeStartup() {
+  // virtual geometry
+  const c = Sim.cfg;
+  Sim.dFafNM = c.dfaf;
+  if (c.apprType === 'ILS') {
+    // distance from threshold to FAF along the path: (platAlt - fieldElev) / tan(GS) feet
+    const altDelta = Math.max(0, c.platAlt - c.fieldElev);
+    const distFromThrToFafFt = altDelta / Math.tan(c.gsAngle * DEG);
+    Sim.dThrNM = c.dfaf + distFromThrToFafFt / FT_PER_NM;
+  } else if (c.lnavMode === 'LNAVV') {
+    // path slope from advisory geometry
+    const slopeFtPerFt = (c.mda - c.fieldElev) / (c.mdaDist * FT_PER_NM);
+    const angleRad = Math.atan(slopeFtPerFt);
+    const altDelta = Math.max(0, c.platAlt - c.fieldElev);
+    const distFromThrToFafFt = (slopeFtPerFt > 0) ? (altDelta / Math.tan(angleRad)) : (c.dfaf + 1) * FT_PER_NM;
+    Sim.dThrNM = c.dfaf + distFromThrToFafFt / FT_PER_NM;
+    Sim.advisoryAngleDeg = angleRad * RAD;
+  } else {
+    // LNAV-only nominal
+    Sim.dThrNM = c.dfaf + 1.0;
+  }
+
+  // configure UI
+  configureSimUI();
+  // switch screens
+  setup.classList.remove('active');
+  sim.classList.add('active');
+  goBtn.disabled = false;
+  goBtn.classList.remove('loading');
+  goBtn.textContent = 'GO';
+  tryWakeLock();
+  // start loop
+  if (Sim.rafId) cancelAnimationFrame(Sim.rafId);
+  Sim.rafId = requestAnimationFrame(loop);
+}
+
+/* configure mode-dependent UI bits */
+function configureSimUI() {
+  const c = Sim.cfg;
+  let modeText = 'ILS';
+  let advText = '';
+  if (c.apprType === 'LNAV') {
+    if (c.lnavMode === 'LNAVV') { modeText = 'LNAV+V'; advText = 'ADV'; }
+    else modeText = 'LNAV';
+  }
+  $('modeTag').textContent = modeText;
+  $('cdiModeLbl').textContent = modeText;
+  $('cdiAdvLbl').textContent = advText;
+  $('courseTag').textContent = String(Math.round(Sim.course)).padStart(3,'0') + '°';
+
+  // hide/show GS needle for LNAV-only
+  const showGS = (c.apprType === 'ILS') || (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV');
+  $('gsNeedle').style.display = showGS ? '' : 'none';
+  document.querySelectorAll('#gsScale circle').forEach(el => {
+    el.style.display = showGS ? '' : 'none';
+  });
+}
+
+/* GPS update — handles smoothing and bookkeeping */
+function onUpdate(pos) {
+  if (Sim.paused || Sim.ended) {
+    Sim.lastFix = pos; // keep latest accuracy
+    return;
+  }
+  const p = pos.coords;
+  // smoothing buffer (3-sample MA)
+  Sim.smooth.push({ lat: p.latitude, lon: p.longitude });
+  if (Sim.smooth.length > 3) Sim.smooth.shift();
+  // GPS altitude moving average (5)
+  if (typeof p.altitude === 'number' && !isNaN(p.altitude)) {
+    Sim.altSmooth.push(p.altitude);
+    if (Sim.altSmooth.length > 5) Sim.altSmooth.shift();
+  }
+  // walked distance for course-fallback / track lock
+  if (Sim.lastFix) {
+    const d = haversineDistance(
+      Sim.lastFix.coords.latitude, Sim.lastFix.coords.longitude,
+      p.latitude, p.longitude
+    );
+    if (d < 100) Sim.walkedM += d; // ignore obvious teleports
+  }
+  Sim.lastFix = pos;
+
+  // If user hadn't supplied a course, and we now have walked >10 m, derive
+  // course from anchor → current.
+  if (Sim.cfg.course === null && compassHeading === null && Sim.walkedM > 10 && !Sim.derivedCourse) {
+    Sim.course = initialBearing(Sim.lat0, Sim.lon0, p.latitude, p.longitude);
+    Sim.derivedCourse = true;
+    $('courseTag').textContent = String(Math.round(Sim.course)).padStart(3,'0') + '°';
+  }
+
+  // Show "Lock Track" button once they've moved >50 m
+  if (Sim.walkedM > 50 && !Sim.trackLocked) {
+    $('lockBtn').style.display = '';
+  }
+}
+
+/* ===========================================================
+   Render loop
+   =========================================================== */
+
+function loop() {
+  Sim.rafId = requestAnimationFrame(loop);
+  render();
+}
+
+function smoothedFix() {
+  if (Sim.smooth.length === 0) return null;
+  let sLat = 0, sLon = 0;
+  Sim.smooth.forEach(s => { sLat += s.lat; sLon += s.lon; });
+  return { lat: sLat / Sim.smooth.length, lon: sLon / Sim.smooth.length };
+}
+function smoothedAltM() {
+  if (Sim.altSmooth.length === 0) return null;
+  return Sim.altSmooth.reduce((a,b) => a+b, 0) / Sim.altSmooth.length;
+}
+
+function render() {
+  if (!Sim.lat0) return;
+  const fix = smoothedFix();
+  if (!fix) return;
+
+  // along/cross track
+  const aM = alongTrackDistance(fix.lat, fix.lon, Sim.lat0, Sim.lon0, Sim.course);
+  const xM = crossTrackDistance(fix.lat, fix.lon, Sim.lat0, Sim.lon0, Sim.course);
+
+  // distances in NM
+  const aNM = aM / M_PER_NM;
+  const distFafNM = Sim.dFafNM - aNM;     // positive: still ahead of FAF
+  const distThrNM = Sim.dThrNM - aNM;     // positive: still ahead of threshold
+
+  // --- lateral deflection scaling ---
+  const c = Sim.cfg;
+  let latDef = 0;             // -1..+1 (right positive)
+  let latPegged = false;
+  if (c.apprType === 'ILS') {
+    // Angular deflection about threshold. Avoid division by ~0 near threshold.
+    const distToThrM = Math.max(50, distThrNM * M_PER_NM);
+    const θ = Math.atan2(xM, distToThrM) * RAD;
+    latDef = Math.max(-1, Math.min(1, θ / 2.5));
+    if (Math.abs(θ) > 2.5) latPegged = true;
+  } else {
+    // RNP LNAV: ±0.30 NM full-scale at ≥2 NM from threshold,
+    // ramping linearly to ±0.10 NM at threshold.
+    const xNM = xM / M_PER_NM;
+    let fullScale;
+    const dist = Math.max(0, distThrNM);
+    if (dist >= 2) fullScale = 0.30;
+    else fullScale = 0.10 + (0.30 - 0.10) * (dist / 2);
+    latDef = Math.max(-1, Math.min(1, xNM / fullScale));
+    if (Math.abs(xNM) > fullScale) latPegged = true;
+  }
+
+  // --- altitude / vertical ---
+  let curAltFt, idealAltFt, vertDef = 0, vertPegged = false;
+  let hasVert = (c.apprType === 'ILS') || (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV');
+  // Ideal altitude on path at along-track distance from threshold
+  // distance from threshold (NM) — must be >=0 for path; clamp at 0 past thr
+  const distFromThrNMForPath = Math.max(0, distThrNM);
+  let pathAngleDeg;
+  if (c.apprType === 'ILS') pathAngleDeg = c.gsAngle;
+  else if (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV') pathAngleDeg = Sim.advisoryAngleDeg || 3.0;
+  else pathAngleDeg = 3.0; // for cosmetic ideal (LNAV-only)
+
+  idealAltFt = c.fieldElev + distFromThrNMForPath * FT_PER_NM * Math.tan(pathAngleDeg * DEG);
+
+  // current altitude per vertical mode
+  let vMode = currentVMode();
+  if (vMode === 'auto') {
+    curAltFt = idealAltFt;
+  } else if (vMode === 'gps') {
+    const altM = smoothedAltM();
+    curAltFt = (altM !== null) ? altM * FT_PER_M : idealAltFt;
+  } else {
+    // manual nudge: ideal + offset
+    curAltFt = idealAltFt + Sim.manualOffset;
+    // decay toward zero at 5 ft/s
+    const now = performance.now();
+    if (Sim.manualDecayLast === null) Sim.manualDecayLast = now;
+    const dt = (now - Sim.manualDecayLast) / 1000;
+    Sim.manualDecayLast = now;
+    if (Sim.manualOffset !== 0) {
+      const decay = 5 * dt;
+      if (Math.abs(Sim.manualOffset) <= decay) Sim.manualOffset = 0;
+      else Sim.manualOffset -= Math.sign(Sim.manualOffset) * decay;
+    }
+  }
+
+  // vertical deviation in feet (positive = above ideal)
+  const dAltFt = curAltFt - idealAltFt;
+  if (hasVert) {
+    // angular ±0.7° about threshold
+    const distToThrM = Math.max(50, distThrNM * M_PER_NM);
+    const dAltM = dAltFt / FT_PER_M;
+    const θv = Math.atan2(dAltM, distToThrM) * RAD;
+    vertDef = Math.max(-1, Math.min(1, θv / 0.7));
+    if (Math.abs(θv) > 0.7) vertPegged = true;
+  }
+
+  // ----- update SVG needles -----
+  // Lateral needle: translate horizontally up to ±40 px (full-scale = 2nd dot)
+  const latX = latDef * 40;
+  $('latNeedle').setAttribute('transform', `translate(${latX.toFixed(1)},0)`);
+  $('latNeedle').setAttribute('stroke', latPegged ? 'var(--amber)' : 'var(--green)');
+
+  if (hasVert) {
+    // GS needle moves vertically. Convention: needle moves UP when aircraft is BELOW path
+    // (you "fly up to needle"). vertDef positive = above => needle moves DOWN.
+    const gsY = vertDef * 40;
+    $('gsNeedle').setAttribute('transform', `translate(0,${gsY.toFixed(1)})`);
+    $('gsNeedle').setAttribute('stroke', vertPegged ? 'var(--amber)' : 'var(--green)');
+  }
+
+  // TO/FROM
+  const toFrom = $('toFromArrow');
+  const toFromTxt = $('toFromText');
+  if (distFafNM > 0) {
+    toFrom.setAttribute('points', '0,-58 -5,-50 5,-50');
+    toFromTxt.textContent = 'TO';
+  } else {
+    toFrom.setAttribute('points', '0,-50 -5,-58 5,-58');
+    toFromTxt.textContent = 'FROM';
+  }
+
+  // ----- update readouts -----
+  const fmtNM = (n) => (n >= 0 ? n.toFixed(2) : ('past ' + Math.abs(n).toFixed(2))) + ' NM';
+  $('rDistFaf').textContent = fmtNM(distFafNM);
+  $('rDistFafSub').textContent = distFafNM < 0 ? 'past FAF' : '';
+  $('rDistThr').textContent = fmtNM(distThrNM);
+
+  $('rCurAlt').textContent = `${Math.round(curAltFt)} ft`;
+  $('rTgtAlt').textContent = `${Math.round(idealAltFt)} ft`;
+  const dAlt = Math.round(curAltFt - idealAltFt);
+  const dSign = dAlt > 0 ? '+' : '';
+  $('rTgtAltSub').textContent = `Δ ${dSign}${dAlt} ft`;
+  $('rCurAltSub').textContent = (vMode === 'auto') ? 'auto-on-path' :
+                                (vMode === 'gps')  ? 'GPS' : 'manual nudge';
+
+  // GPS accuracy label
+  if (Sim.lastFix) {
+    const acc = Sim.lastFix.coords.accuracy;
+    const accStr = (acc !== null && !isNaN(acc)) ? `±${Math.round(acc)} m` : '';
+    const lab = $('gpsTag');
+    lab.textContent = `GPS ${accStr}`;
+    if (acc > 15) lab.classList.add('warn'); else lab.classList.remove('warn');
+  }
+
+  // MDA / DA banner
+  let mdaBannerOn = false;
+  if (c.apprType === 'ILS') {
+    // For ILS, treat DA as fieldElev + ~200 ft and use distance computed by GS (simplified): show when ≤ ~0.5 NM from threshold AND below ~platform/3
+    // Use a reasonable proxy: trigger when within 0.5 NM of threshold.
+    if (distThrNM <= 0.5 && distThrNM > -0.3) mdaBannerOn = true;
+  } else if (c.lnavMode === 'LNAVV' || c.lnavMode === 'LAT') {
+    if (c.lnavMode === 'LNAVV' && distThrNM <= c.mdaDist && distThrNM > -0.3) mdaBannerOn = true;
+  }
+  $('minBanner').classList.toggle('show', mdaBannerOn);
+
+  // Past threshold => freeze
+  if (!Sim.ended && distThrNM <= -0.05) {
+    Sim.ended = true;
+    $('endBannerTxt').textContent = 'GO AROUND / TOUCHDOWN';
+    $('endBanner').classList.add('show');
+  }
+}
+
+/* vertical mode segment */
+let vMode = 'auto';
+function currentVMode() { return vMode; }
+bindSeg($('vModeSeg'), v => {
+  vMode = v;
+  $('nudgeRow').classList.toggle('show', v === 'manual');
+  if (v !== 'manual') Sim.manualOffset = 0;
+});
+
+$('nudgeUp').addEventListener('click', () => { Sim.manualOffset += 25; });
+$('nudgeDn').addEventListener('click', () => { Sim.manualOffset -= 25; });
+
+/* pause / reset / lock track */
+$('pauseBtn').addEventListener('click', () => {
+  Sim.paused = !Sim.paused;
+  $('pauseBtn').classList.toggle('on', Sim.paused);
+  $('pauseBtn').textContent = Sim.paused ? 'Resume' : 'Pause';
+});
+$('lockBtn').addEventListener('click', () => {
+  // Lock centerline to actual walked track from anchor → current smoothed position.
+  const fix = smoothedFix();
+  if (!fix) return;
+  Sim.course = initialBearing(Sim.lat0, Sim.lon0, fix.lat, fix.lon);
+  Sim.trackLocked = true;
+  $('lockBtn').style.display = 'none';
+  $('courseTag').textContent = String(Math.round(Sim.course)).padStart(3,'0') + '°';
+});
+$('resetBtn').addEventListener('click', resetToSetup);
+$('endResetBtn').addEventListener('click', resetToSetup);
+
+function resetToSetup() {
+  if (Sim.watchId !== null) navigator.geolocation.clearWatch(Sim.watchId);
+  Sim.watchId = null;
+  if (Sim.rafId) cancelAnimationFrame(Sim.rafId);
+  Sim.rafId = null;
+  releaseWakeLock();
+  Sim.lastFix = null;
+  Sim.smooth = [];
+  Sim.altSmooth = [];
+  Sim.derivedCourse = false;
+  Sim.ended = false;
+  Sim.paused = false;
+  $('pauseBtn').classList.remove('on');
+  $('pauseBtn').textContent = 'Pause';
+  $('endBanner').classList.remove('show');
+  $('minBanner').classList.remove('show');
+  $('lockBtn').style.display = 'none';
+
+  sim.classList.remove('active');
+  setup.classList.add('active');
+}
+
+/* ===========================================================
+   Demo / mock GPS (developer aid; off by default).
+   Activate by appending ?demo=1 to the URL.
+   Walks the simulated pilot along (or slightly off) centerline.
+   =========================================================== */
+(function maybeDemo() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('demo') !== '1') return;
+  // Override geolocation with a synthetic source.
+  let lat = 51.5, lon = -0.1;
+  let alt = 700;
+  let t0 = Date.now();
+  const fakeWatch = (success) => {
+    const fire = () => {
+      const dtSec = (Date.now() - t0) / 1000;
+      // walk ~1.4 m/s along a random course; offset slightly side to side
+      const stepM = 1.4 * 0.5;
+      const headingRad = 90 * DEG;
+      const dy = Math.cos(headingRad) * stepM / 111111;
+      const dx = Math.sin(headingRad) * stepM / (111111 * Math.cos(lat * DEG));
+      lat += dy; lon += dx;
+      const wobble = Math.sin(dtSec / 3) * 4;   // ~4 m off-axis
+      // perpendicular offset
+      const perpRad = headingRad + Math.PI/2;
+      const olat = (Math.cos(perpRad) * wobble) / 111111;
+      const olon = (Math.sin(perpRad) * wobble) / (111111 * Math.cos(lat * DEG));
+      alt -= 0.5; // descend slightly
+      success({
+        coords: {
+          latitude: lat + olat, longitude: lon + olon,
+          altitude: alt / FT_PER_M, accuracy: 5,
+          altitudeAccuracy: 8, heading: 90, speed: 1.4
+        },
+        timestamp: Date.now()
+      });
+    };
+    fire();
+    return setInterval(fire, 500);
+  };
+  const g = {
+    getCurrentPosition: (s) => fakeWatch(s),
+    watchPosition: (s) => fakeWatch(s),
+    clearWatch: (id) => clearInterval(id),
+  };
+  Object.defineProperty(navigator, 'geolocation', { value: g, configurable: true });
+  console.info('[demo mode active]');
+})();
+</script>
+</body>
+</html>
