@@ -123,6 +123,22 @@
     color: var(--ink-dim);
     margin-top: 4px;
   }
+  .field .hint .link-btn {
+    background: none;
+    border: none;
+    color: var(--amber);
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 1px 4px;
+    font-size: 11px;
+    font-family: inherit;
+    letter-spacing: 0.04em;
+  }
+  .field .hint .link-btn:disabled {
+    color: var(--ink-dim);
+    cursor: default;
+    text-decoration: none;
+  }
   .field.invalid input { border-color: var(--red); }
   .field.invalid .hint { color: var(--red); }
 
@@ -459,7 +475,10 @@
       <div class="field" id="f-platalt">
         <label>Platform Alt (ft MSL)</label>
         <input type="number" id="platalt" step="100" min="0" max="20000" value="2000" inputmode="numeric">
-        <div class="hint">Altitude at FAF</div>
+        <div class="hint">
+          Altitude at FAF ·
+          <button type="button" id="useCurrentAltBtn" class="link-btn">use current</button>
+        </div>
       </div>
     </div>
   </div>
@@ -469,14 +488,19 @@
     <div class="row">
       <div class="field" id="f-gs">
         <label>Glideslope angle (°)</label>
-        <input type="number" id="gsAngle" step="0.1" min="2.5" max="3.5" value="3.0" inputmode="decimal">
-        <div class="hint">2.5 – 3.5</div>
+        <input type="number" id="gsAngle" step="0.1" min="2.0" max="6.0" value="3.0" inputmode="decimal">
+        <div class="hint">typical 2.5 – 3.5</div>
       </div>
-      <div class="field" id="f-ilsDa">
-        <label>DA (ft MSL)</label>
-        <input type="number" id="ilsDa" step="10" min="0" max="20000" value="200" inputmode="numeric">
-        <div class="hint">Decision altitude</div>
+      <div class="field" id="f-faMap">
+        <label>FAF → MAP (NM)</label>
+        <input type="number" id="faMapDist" step="0.1" min="0.1" max="20" value="5.66" inputmode="decimal">
+        <div class="hint">linked to GS</div>
       </div>
+    </div>
+    <div class="field" id="f-ilsDa">
+      <label>DA (ft)</label>
+      <input type="number" id="ilsDa" step="10" min="0" max="20000" value="200" inputmode="numeric">
+      <div class="hint">Decision altitude (above threshold)</div>
     </div>
   </div>
 
@@ -502,18 +526,11 @@
   </div>
 
   <div class="group">
-    <div class="glabel">Course &amp; Field</div>
-    <div class="row">
-      <div class="field" id="f-course">
-        <label>Approach course (°M)</label>
-        <input type="number" id="course" step="1" min="1" max="360" placeholder="auto" inputmode="numeric">
-        <div class="hint">Blank = use device heading</div>
-      </div>
-      <div class="field" id="f-field">
-        <label>Field elev (ft MSL)</label>
-        <input type="number" id="fieldElev" step="10" value="0" inputmode="numeric">
-        <div class="hint">Optional</div>
-      </div>
+    <div class="glabel">Approach Course</div>
+    <div class="field" id="f-course">
+      <label>Approach course (°M)</label>
+      <input type="number" id="course" step="1" min="1" max="360" placeholder="auto" inputmode="numeric">
+      <div class="hint">Blank = use device heading at Go</div>
     </div>
   </div>
 
@@ -663,6 +680,8 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.6.0  FAF→MAP input linked to GS angle; remove field elev; LNAV+V hides GS bar
+     0.5.0  Source-aware platalt auto-fill (GPS or Bridge); "use current" button
      0.4.3  Fix LOC needle direction (was inverted — now points to centerline)
      0.4.2  Tgt Alt steps at whole NM after FAF for LNAV (matches charts)
      0.4.1  Centralise APP_VERSION; show on simulation screen
@@ -671,7 +690,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.4.3';
+const APP_VERSION = 'v0.6.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -804,16 +823,11 @@ function validateAdvisoryAngle() {
   w.textContent = '';
   w.style.color = '';
   if (apprType !== 'LNAV' || lnavMode !== 'LNAVV') return;
-  const platAlt = +$('platalt').value;
-  const fld = +$('fieldElev').value || 0;
-  const dfaf = +$('dfaf').value;
+  // Path runs from threshold (alt 0) through (mdaDist, mda).
   const mda = +$('mda').value;
   const mdaDist = +$('mdaDist').value;
-  // path: from threshold (alt = field) through (mdaDist, mda) — angle:
-  // altitude at FAF inferred = field + (dfaf+(mdaDist would be subtracted? no)
-  // Path slope from (0, field) to (mdaDist, mda): rise/run.
   if (mdaDist <= 0) return;
-  const slope = (mda - fld) / (mdaDist * FT_PER_NM);
+  const slope = mda / (mdaDist * FT_PER_NM);
   const angle = Math.atan(slope) * RAD;
   if (angle < 2.0 || angle > 4.0) {
     w.textContent = `Advisory path ≈ ${angle.toFixed(2)}° (outside 2.0–4.0° — non-standard)`;
@@ -823,41 +837,185 @@ function validateAdvisoryAngle() {
     w.style.color = 'var(--ink-dim)';
   }
 }
-['platalt','fieldElev','dfaf','mda','mdaDist'].forEach(id => {
+['platalt','dfaf','mda','mdaDist'].forEach(id => {
   $(id).addEventListener('input', validateAdvisoryAngle);
 });
 
-// Auto-suggest ILS DA = fieldElev + 200 ft (CAT I minimum) until the user
-// edits the DA field manually. Tracking via a flag so we don't fight the user.
-let ilsDaUserEdited = false;
-$('ilsDa').addEventListener('input', () => { ilsDaUserEdited = true; });
-$('fieldElev').addEventListener('input', () => {
-  if (!ilsDaUserEdited) {
-    const fe = +$('fieldElev').value || 0;
-    $('ilsDa').value = fe + 200;
+// ----- ILS GS angle ↔ FAF→MAP distance, mutually dependent -----
+// Both are derived from platAlt and DA:
+//    FAF→MAP (NM)   = (platAlt − DA) / tan(GS) / 6076
+//    GS angle (deg) = atan((platAlt − DA) / (FAF→MAP × 6076))
+// We track which field the user edited last and treat it as the anchor —
+// the OTHER field recomputes when platAlt or DA change. The flag
+// `ilsRecomputing` prevents the synthetic .value updates from re-firing.
+let lastIlsEdit = 'gs';   // 'gs' | 'famap'
+let ilsRecomputing = false;
+
+function recomputeFafMap() {
+  const platAlt = +$('platalt').value;
+  const da = +$('ilsDa').value;
+  const gsAngle = +$('gsAngle').value;
+  if (platAlt > da && gsAngle > 0) {
+    const distNM = (platAlt - da) / Math.tan(gsAngle * DEG) / FT_PER_NM;
+    ilsRecomputing = true;
+    $('faMapDist').value = distNM.toFixed(2);
+    ilsRecomputing = false;
   }
+}
+function recomputeGsAngle() {
+  const platAlt = +$('platalt').value;
+  const da = +$('ilsDa').value;
+  const distNM = +$('faMapDist').value;
+  if (platAlt > da && distNM > 0) {
+    const angleDeg = Math.atan2(platAlt - da, distNM * FT_PER_NM) * RAD;
+    ilsRecomputing = true;
+    $('gsAngle').value = angleDeg.toFixed(2);
+    ilsRecomputing = false;
+  }
+}
+function syncIlsGeometry() {
+  if (lastIlsEdit === 'gs') recomputeFafMap();
+  else recomputeGsAngle();
+}
+
+$('gsAngle').addEventListener('input', () => {
+  if (ilsRecomputing) return;
+  lastIlsEdit = 'gs';
+  recomputeFafMap();
+});
+$('faMapDist').addEventListener('input', () => {
+  if (ilsRecomputing) return;
+  lastIlsEdit = 'famap';
+  recomputeGsAngle();
+});
+$('platalt').addEventListener('input', () => {
+  if (ilsRecomputing) return;
+  syncIlsGeometry();
+});
+$('ilsDa').addEventListener('input', () => {
+  if (ilsRecomputing) return;
+  syncIlsGeometry();
 });
 
-// Prefill platform altitude from device GPS on first load. Skip if the user
-// has typed a value already; skip silently on permission denial / timeout.
+// Initial sync so the default FAF→MAP matches the default GS / platAlt / DA.
+syncIlsGeometry();
+
+// Track whether the user has manually edited the platform altitude, so we
+// don't override their value when auto-fill fires.
 let platAltUserEdited = false;
 $('platalt').addEventListener('input', () => { platAltUserEdited = true; });
-if ('geolocation' in navigator) {
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      if (platAltUserEdited) return;
-      const altM = pos.coords.altitude;
-      if (typeof altM === 'number' && !isNaN(altM)) {
-        const altFt = Math.round(altM * FT_PER_M / 10) * 10; // round to 10 ft
-        $('platalt').value = altFt;
-        // Re-run advisory-angle validation in case it now changes.
-        validateAdvisoryAngle();
+
+/**
+ * Fetch a current-altitude reading from whichever source is currently selected.
+ * GPS: navigator.geolocation.getCurrentPosition (one-shot).
+ * Bridge: open a temporary WebSocket, take the first message that has alt_ft, close.
+ *
+ * Returns a promise that resolves with { ok, altFt, source, msg }.
+ */
+function fetchCurrentAltitude() {
+  return new Promise((resolve) => {
+    if (locSource === 'gps') {
+      if (!('geolocation' in navigator)) {
+        resolve({ ok: false, msg: 'no GPS' }); return;
       }
-    },
-    () => { /* permission denied or timeout - keep the typed default */ },
-    { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
-  );
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const altM = pos.coords.altitude;
+          if (typeof altM === 'number' && !isNaN(altM)) {
+            resolve({ ok: true, altFt: altM * FT_PER_M, source: 'gps' });
+          } else {
+            resolve({ ok: false, msg: 'no GPS alt' });
+          }
+        },
+        (err) => resolve({
+          ok: false,
+          msg: (err && err.code === 1) ? 'GPS denied' : 'GPS error'
+        }),
+        { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 }
+      );
+    } else {
+      // Bridge — connect briefly and grab the first message with alt_ft.
+      const url = ($('bridgeUrl').value || '').trim();
+      if (!url) { resolve({ ok: false, msg: 'no URL' }); return; }
+      let ws;
+      try { ws = new WebSocket(url); }
+      catch (e) { resolve({ ok: false, msg: 'bad URL' }); return; }
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        try { ws.close(); } catch(e){}
+        resolve(result);
+      };
+      const timeoutId = setTimeout(
+        () => finish({ ok: false, msg: 'bridge timeout' }),
+        5000
+      );
+      ws.addEventListener('message', (ev) => {
+        let m;
+        try { m = JSON.parse(ev.data); } catch { return; }
+        if (typeof m.alt_ft === 'number' && !isNaN(m.alt_ft)) {
+          clearTimeout(timeoutId);
+          finish({ ok: true, altFt: m.alt_ft, source: 'bridge' });
+        }
+        // else (e.g. XATT-only message) keep waiting.
+      });
+      ws.addEventListener('error', () => {
+        clearTimeout(timeoutId);
+        finish({ ok: false, msg: 'connect failed' });
+      });
+    }
+  });
 }
+
+/** Auto-fill platalt from current source. Skips if the user has typed (unless force=true). */
+async function autoFillPlatAlt(force = false) {
+  if (!force && platAltUserEdited) return null;
+  const r = await fetchCurrentAltitude();
+  if (r.ok) {
+    $('platalt').value = Math.round(r.altFt / 10) * 10;
+    platAltUserEdited = false; // fresh auto-fill — allow re-trigger
+    validateAdvisoryAngle();
+    // Keep the GS angle ↔ FAF→MAP relationship consistent with the new platalt.
+    if (apprType === 'ILS') syncIlsGeometry();
+  }
+  return r;
+}
+
+// Initial trigger on page load (default source is GPS).
+autoFillPlatAlt();
+
+// "Use current" button — explicit refresh, ignores user-edit flag, shows feedback.
+$('useCurrentAltBtn').addEventListener('click', async () => {
+  const btn = $('useCurrentAltBtn');
+  const orig = 'use current';
+  btn.disabled = true;
+  btn.textContent = 'fetching…';
+  const r = await autoFillPlatAlt(true);
+  if (r && r.ok) {
+    btn.textContent = `✓ ${r.source}`;
+  } else {
+    btn.textContent = (r && r.msg) || 'failed';
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+});
+
+// Re-fetch when the user toggles to a different source.
+$('srcSeg').querySelectorAll('button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    // Run after locSource is updated by the existing seg handler.
+    setTimeout(() => autoFillPlatAlt(), 30);
+  });
+});
+
+// Re-fetch when the user changes the bridge URL (debounced ~1.2 s).
+let bridgeUrlDebounce = null;
+$('bridgeUrl').addEventListener('input', () => {
+  clearTimeout(bridgeUrlDebounce);
+  bridgeUrlDebounce = setTimeout(() => {
+    if (locSource === 'bridge') autoFillPlatAlt();
+  }, 1200);
+});
 
 function readSetupValues() {
   const v = {
@@ -866,11 +1024,12 @@ function readSetupValues() {
     dfaf: +$('dfaf').value,
     platAlt: +$('platalt').value,
     gsAngle: +$('gsAngle').value,
+    faMapDist: +$('faMapDist').value,
     ilsDa: +$('ilsDa').value,
     mda: +$('mda').value,
     mdaDist: +$('mdaDist').value,
     course: $('course').value === '' ? null : +$('course').value,
-    fieldElev: +$('fieldElev').value || 0,
+    fieldElev: 0,   // field elevation removed from UI; treated as 0 internally
   };
   return v;
 }
@@ -887,8 +1046,9 @@ function validateSetup() {
   mark('f-dfaf',   !(v.dfaf >= 0.5 && v.dfaf <= 15), 'Distance from FAF 0.5–15');
   mark('f-platalt',!(v.platAlt >= 0 && v.platAlt <= 20000), 'Platform altitude 0–20000');
   if (v.apprType === 'ILS') {
-    mark('f-gs', !(v.gsAngle >= 2.5 && v.gsAngle <= 3.5), 'GS angle 2.5–3.5');
-    mark('f-ilsDa', !(v.ilsDa >= 0 && v.ilsDa <= 20000), 'DA 0–20000');
+    mark('f-gs',    !(v.gsAngle  >= 2.0 && v.gsAngle  <= 6.0), 'GS angle 2.0–6.0');
+    mark('f-faMap', !(v.faMapDist > 0   && v.faMapDist <= 20), 'FAF→MAP 0.1–20');
+    mark('f-ilsDa', !(v.ilsDa    >= 0   && v.ilsDa    <= 20000), 'DA 0–20000');
   } else if (v.lnavMode === 'LNAVV') {
     mark('f-mda',     !(v.mda >= 0 && v.mda <= 20000), 'MDA 0–20000');
     mark('f-mdaDist', !(v.mdaDist > 0 && v.mdaDist <= 5), 'MDA→Thr 0–5');
@@ -1164,8 +1324,10 @@ function configureSimUI() {
   $('cdiAdvLbl').textContent = advText;
   $('courseTag').textContent = String(Math.round(Sim.course)).padStart(3,'0') + '°';
 
-  // hide/show GS needle for LNAV-only
-  const showGS = (c.apprType === 'ILS') || (c.apprType === 'LNAV' && c.lnavMode === 'LNAVV');
+  // GS needle is only shown for ILS. For RNP LNAV (with or without advisory
+  // VNAV) we hide the bar but still compute and display all the vertical-nav
+  // numerics — Tgt Alt, Tgt FPM, Next Step, Step Δ etc.
+  const showGS = (c.apprType === 'ILS');
   $('gsNeedle').style.display = showGS ? '' : 'none';
   document.querySelectorAll('#gsScale circle').forEach(el => {
     el.style.display = showGS ? '' : 'none';
