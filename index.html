@@ -412,7 +412,7 @@
      SETUP SCREEN
      ========================================================= -->
 <section id="setup" class="screen active">
-  <h1>Approach Simulator</h1>
+  <h1>Approach Simulator <span id="appVersionTag" style="font-size:11px;color:var(--ink-dim);letter-spacing:0.06em;font-weight:normal">v0.3.0</span></h1>
   <div class="sub">Walk a simulated ILS or RNP LNAV approach. Your real-world walking maps onto the final-approach segment.</div>
   <div class="disclaimer">Training simulation only. Not for navigation.</div>
 
@@ -455,10 +455,17 @@
 
   <div class="group" id="ilsGroup">
     <div class="glabel">Vertical Guidance — ILS</div>
-    <div class="field" id="f-gs">
-      <label>Glideslope angle (°)</label>
-      <input type="number" id="gsAngle" step="0.1" min="2.5" max="3.5" value="3.0" inputmode="decimal">
-      <div class="hint">Range 2.5 – 3.5</div>
+    <div class="row">
+      <div class="field" id="f-gs">
+        <label>Glideslope angle (°)</label>
+        <input type="number" id="gsAngle" step="0.1" min="2.5" max="3.5" value="3.0" inputmode="decimal">
+        <div class="hint">2.5 – 3.5</div>
+      </div>
+      <div class="field" id="f-ilsDa">
+        <label>DA (ft MSL)</label>
+        <input type="number" id="ilsDa" step="10" min="0" max="20000" value="200" inputmode="numeric">
+        <div class="hint">Decision altitude</div>
+      </div>
     </div>
   </div>
 
@@ -590,6 +597,16 @@
           <div class="lbl">Tgt Alt</div>
           <div class="val amber" id="rTgtAlt">— ft</div>
           <div class="sub" id="rTgtAltSub">Δ — ft</div>
+        </div>
+        <div class="readout">
+          <div class="lbl">Tgt FPM</div>
+          <div class="val amber" id="rTgtFpm">— fpm</div>
+          <div class="sub" id="rTgtFpmSub">at current GS</div>
+        </div>
+        <div class="readout">
+          <div class="lbl">GS</div>
+          <div class="val" id="rGs">— kt</div>
+          <div class="sub" id="rGsSub"></div>
         </div>
       </div>
 
@@ -758,6 +775,17 @@ function validateAdvisoryAngle() {
   $(id).addEventListener('input', validateAdvisoryAngle);
 });
 
+// Auto-suggest ILS DA = fieldElev + 200 ft (CAT I minimum) until the user
+// edits the DA field manually. Tracking via a flag so we don't fight the user.
+let ilsDaUserEdited = false;
+$('ilsDa').addEventListener('input', () => { ilsDaUserEdited = true; });
+$('fieldElev').addEventListener('input', () => {
+  if (!ilsDaUserEdited) {
+    const fe = +$('fieldElev').value || 0;
+    $('ilsDa').value = fe + 200;
+  }
+});
+
 function readSetupValues() {
   const v = {
     apprType,
@@ -765,6 +793,7 @@ function readSetupValues() {
     dfaf: +$('dfaf').value,
     platAlt: +$('platalt').value,
     gsAngle: +$('gsAngle').value,
+    ilsDa: +$('ilsDa').value,
     mda: +$('mda').value,
     mdaDist: +$('mdaDist').value,
     course: $('course').value === '' ? null : +$('course').value,
@@ -786,6 +815,7 @@ function validateSetup() {
   mark('f-platalt',!(v.platAlt >= 0 && v.platAlt <= 20000), 'Platform altitude 0–20000');
   if (v.apprType === 'ILS') {
     mark('f-gs', !(v.gsAngle >= 2.5 && v.gsAngle <= 3.5), 'GS angle 2.5–3.5');
+    mark('f-ilsDa', !(v.ilsDa >= 0 && v.ilsDa <= 20000), 'DA 0–20000');
   } else if (v.lnavMode === 'LNAVV') {
     mark('f-mda',     !(v.mda >= 0 && v.mda <= 20000), 'MDA 0–20000');
     mark('f-mdaDist', !(v.mdaDist > 0 && v.mdaDist <= 5), 'MDA→Thr 0–5');
@@ -833,6 +863,7 @@ const Sim = {
   lastFix: null,
   smooth: [],   // moving average for lat/lon
   altSmooth: [],
+  gsSmooth: [], // groundspeed moving average (m/s)
   // track lock candidate
   walkedM: 0,
   trackLocked: false,
@@ -885,6 +916,7 @@ function beginSimulation(cfg) {
   Sim.cfg = cfg;
   Sim.smooth = [];
   Sim.altSmooth = [];
+  Sim.gsSmooth = [];
   Sim.walkedM = 0;
   Sim.trackLocked = false;
   Sim.paused = false;
@@ -1082,6 +1114,11 @@ function onUpdate(pos) {
     Sim.altSmooth.push(p.altitude);
     if (Sim.altSmooth.length > 5) Sim.altSmooth.shift();
   }
+  // Groundspeed (m/s) moving average — used for Tgt FPM and the GS readout.
+  if (typeof p.speed === 'number' && !isNaN(p.speed) && p.speed >= 0) {
+    Sim.gsSmooth.push(p.speed);
+    if (Sim.gsSmooth.length > 5) Sim.gsSmooth.shift();
+  }
   // walked distance for course-fallback / track lock
   if (Sim.lastFix) {
     const d = haversineDistance(
@@ -1175,16 +1212,29 @@ function render() {
 
   idealAltFt = c.fieldElev + distFromThrNMForPath * FT_PER_NM * Math.tan(pathAngleDeg * DEG);
 
-  // current altitude per vertical mode
+  // Procedure altitude: what the pilot SHOULD be at if flying the procedure.
+  //   Before the FAF, you hold platform altitude.
+  //   At the FAF, the glide path comes down to meet you and you start to descend.
+  //   After the FAF, follow the GS path itself.
+  // This makes the GS needle deflect "fly UP" before the FAF (path is above),
+  // come centred exactly at the FAF, and stay centred on the path inbound.
+  let refAltFt;
+  if (hasVert && distFafNM > 0) {
+    refAltFt = c.platAlt;
+  } else {
+    refAltFt = idealAltFt;
+  }
+
+  // current altitude per vertical mode (referenced to procedure altitude)
   let vMode = currentVMode();
   if (vMode === 'auto') {
-    curAltFt = idealAltFt;
+    curAltFt = refAltFt;
   } else if (vMode === 'gps') {
     const altM = smoothedAltM();
-    curAltFt = (altM !== null) ? altM * FT_PER_M : idealAltFt;
+    curAltFt = (altM !== null) ? altM * FT_PER_M : refAltFt;
   } else {
-    // manual nudge: ideal + offset
-    curAltFt = idealAltFt + Sim.manualOffset;
+    // manual nudge: procedure altitude + offset
+    curAltFt = refAltFt + Sim.manualOffset;
     // decay toward zero at 5 ft/s
     const now = performance.now();
     if (Sim.manualDecayLast === null) Sim.manualDecayLast = now;
@@ -1240,12 +1290,46 @@ function render() {
   $('rDistThr').textContent = fmtNM(distThrNM);
 
   $('rCurAlt').textContent = `${Math.round(curAltFt)} ft`;
-  $('rTgtAlt').textContent = `${Math.round(idealAltFt)} ft`;
-  const dAlt = Math.round(curAltFt - idealAltFt);
+  // "Tgt Alt" shows the procedure target — platform alt before the FAF,
+  // GS-path alt at and after — so the displayed delta matches what the
+  // pilot should fly to (and matches the GS needle's centring point at FAF).
+  $('rTgtAlt').textContent = `${Math.round(refAltFt)} ft`;
+  const dAlt = Math.round(curAltFt - refAltFt);
   const dSign = dAlt > 0 ? '+' : '';
   $('rTgtAltSub').textContent = `Δ ${dSign}${dAlt} ft`;
   $('rCurAltSub').textContent = (vMode === 'auto') ? 'auto-on-path' :
                                 (vMode === 'gps')  ? 'GPS' : 'manual nudge';
+
+  // Groundspeed and target descent rate.
+  // Required FPM to maintain the path at current GS:
+  //   FPM = gs_kt * (FT_PER_NM / 60 minutes) * tan(angle)
+  // (Rule of thumb: ~5 × gs_kt for a 3° glidepath.)
+  const gsMs = Sim.gsSmooth.length > 0
+    ? Sim.gsSmooth.reduce((a,b) => a+b, 0) / Sim.gsSmooth.length
+    : null;
+  const gsKt = (gsMs !== null) ? gsMs * 1.9438444924406046 : null;
+
+  if (gsKt !== null) {
+    $('rGs').textContent = `${Math.round(gsKt)} kt`;
+    $('rGsSub').textContent = '';
+  } else {
+    $('rGs').textContent = '— kt';
+    $('rGsSub').textContent = 'no speed data';
+  }
+
+  if (hasVert && gsKt !== null && gsKt >= 5) {
+    const tgtFpm = gsKt * (FT_PER_NM / 60) * Math.tan(pathAngleDeg * DEG);
+    $('rTgtFpm').textContent = `${Math.round(tgtFpm)} fpm`;
+    $('rTgtFpmSub').textContent = (distFafNM > 0)
+      ? 'after FAF intercept'
+      : `${pathAngleDeg.toFixed(1)}° path`;
+  } else if (!hasVert) {
+    $('rTgtFpm').textContent = '— fpm';
+    $('rTgtFpmSub').textContent = 'no vertical guidance';
+  } else {
+    $('rTgtFpm').textContent = '— fpm';
+    $('rTgtFpmSub').textContent = 'awaiting groundspeed';
+  }
 
   // Source / accuracy label
   if (Sim.lastFix) {
@@ -1258,14 +1342,22 @@ function render() {
     if (Sim.locSource === 'gps' && acc > 15) lab.classList.add('warn'); else lab.classList.remove('warn');
   }
 
-  // MDA / DA banner
+  // MINIMUMS banner.
+  //   ILS:    triggers when curAlt drops below DA on the inbound segment.
+  //   LNAV+V: triggers when distance-to-threshold reaches the configured MDA point.
+  //   LNAV:   uses the same MDA value but distance proxy of mdaDist (0.5 NM default).
   let mdaBannerOn = false;
   if (c.apprType === 'ILS') {
-    // For ILS, treat DA as fieldElev + ~200 ft and use distance computed by GS (simplified): show when ≤ ~0.5 NM from threshold AND below ~platform/3
-    // Use a reasonable proxy: trigger when within 0.5 NM of threshold.
-    if (distThrNM <= 0.5 && distThrNM > -0.3) mdaBannerOn = true;
-  } else if (c.lnavMode === 'LNAVV' || c.lnavMode === 'LAT') {
-    if (c.lnavMode === 'LNAVV' && distThrNM <= c.mdaDist && distThrNM > -0.3) mdaBannerOn = true;
+    if (distFafNM <= 0 && distThrNM > -0.3 && curAltFt <= c.ilsDa) {
+      mdaBannerOn = true;
+    }
+  } else if (c.apprType === 'LNAV') {
+    if (c.lnavMode === 'LNAVV') {
+      if (distThrNM <= c.mdaDist && distThrNM > -0.3) mdaBannerOn = true;
+    } else {
+      // LNAV-only: nominal 0.5 NM from threshold as MDA proxy
+      if (distThrNM <= 0.5 && distThrNM > -0.3) mdaBannerOn = true;
+    }
   }
   $('minBanner').classList.toggle('show', mdaBannerOn);
 
@@ -1317,6 +1409,7 @@ function resetToSetup() {
   Sim.lastFix = null;
   Sim.smooth = [];
   Sim.altSmooth = [];
+  Sim.gsSmooth = [];
   Sim.derivedCourse = false;
   Sim.ended = false;
   Sim.paused = false;
