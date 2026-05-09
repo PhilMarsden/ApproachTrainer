@@ -244,6 +244,16 @@
     max-height: 60vh;
   }
   .cdi-wrap svg { width: 100%; height: 100%; display: block; }
+  .cdi-version {
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    font-size: 9px;
+    color: var(--ink-dim);
+    opacity: 0.55;
+    letter-spacing: 0.05em;
+    pointer-events: none;
+  }
 
   .readouts {
     display: grid;
@@ -413,7 +423,7 @@
      SETUP SCREEN
      ========================================================= -->
 <section id="setup" class="screen active">
-  <h1>Approach Simulator <span id="appVersionTag" style="font-size:11px;color:var(--ink-dim);letter-spacing:0.06em;font-weight:normal">v0.4.0</span></h1>
+  <h1>Approach Simulator <span class="app-version" style="font-size:11px;color:var(--ink-dim);letter-spacing:0.06em;font-weight:normal"></span></h1>
   <div class="sub">Walk a simulated ILS or RNP LNAV approach. Your real-world walking maps onto the final-approach segment.</div>
   <div class="disclaimer">Training simulation only. Not for navigation.</div>
 
@@ -571,6 +581,7 @@
       </svg>
 
       <div class="banner" id="minBanner">MINIMUMS — DECIDE</div>
+      <div class="cdi-version app-version"></div>
       <div class="end-banner" id="endBanner">
         <div class="big" id="endBannerTxt">GO AROUND / TOUCHDOWN</div>
         <button id="endResetBtn">Reset</button>
@@ -645,6 +656,34 @@
 </section>
 
 <script>
+/* ===========================================================
+   Version
+   ===========================================================
+   Bump on every meaningful change. Shown next to the title on
+   the setup screen and in the bottom-left of the CDI panel on
+   the simulation screen, so a stale copy is obvious at a glance.
+
+     0.4.1  Centralise APP_VERSION; show on simulation screen
+     0.4.0  Default platalt to GPS alt; LNAV step-down readouts
+     0.3.0  ILS DA input, target FPM, groundspeed readout
+     0.2.0  ILS GS deflects before FAF; setup-screen version label
+     0.1.x  Initial release; MSFS Bridge support added
+*/
+const APP_VERSION = 'v0.4.1';
+// Inject the version into every .app-version element. The script lives at the
+// end of <body> so the elements are already parsed; we still guard with a
+// DOMContentLoaded fallback in case the script is ever moved.
+function injectAppVersion() {
+  document.querySelectorAll('.app-version').forEach(el => {
+    el.textContent = APP_VERSION;
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', injectAppVersion);
+} else {
+  injectAppVersion();
+}
+
 /* ===========================================================
    Constants &amp; conversions
    =========================================================== */
