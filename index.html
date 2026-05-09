@@ -663,13 +663,14 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.4.2  Tgt Alt steps at whole NM after FAF for LNAV (matches charts)
      0.4.1  Centralise APP_VERSION; show on simulation screen
      0.4.0  Default platalt to GPS alt; LNAV step-down readouts
      0.3.0  ILS DA input, target FPM, groundspeed readout
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.4.1';
+const APP_VERSION = 'v0.4.2';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1361,11 +1362,20 @@ function render() {
   $('rDistThr').textContent = fmtNM(distThrNM);
 
   $('rCurAlt').textContent = `${Math.round(curAltFt)} ft`;
-  // "Tgt Alt" shows the procedure target — platform alt before the FAF,
-  // GS-path alt at and after — so the displayed delta matches what the
-  // pilot should fly to (and matches the GS needle's centring point at FAF).
-  $('rTgtAlt').textContent = `${Math.round(refAltFt)} ft`;
-  const dAlt = Math.round(curAltFt - refAltFt);
+  // "Tgt Alt" shows the procedure target.
+  //   Pre-FAF (any mode): platform altitude.
+  //   Post-FAF for LNAV: snaps to the altitude at the next whole-NM crossing
+  //                      toward threshold, matching published step-down charts.
+  //   Post-FAF for ILS:  continuous GS-path altitude (matches the GS needle).
+  // (refAltFt itself stays continuous so auto/manual altitude tracking and the
+  //  GS needle math are unaffected — this only changes the readout.)
+  let displayTgtAltFt = refAltFt;
+  if (distFafNM <= 0 && c.apprType === 'LNAV') {
+    const stepNM = Math.floor(Math.max(0, distThrNM - 0.001));
+    displayTgtAltFt = c.fieldElev + stepNM * FT_PER_NM * Math.tan(pathAngleDeg * DEG);
+  }
+  $('rTgtAlt').textContent = `${Math.round(displayTgtAltFt)} ft`;
+  const dAlt = Math.round(curAltFt - displayTgtAltFt);
   const dSign = dAlt > 0 ? '+' : '';
   $('rTgtAltSub').textContent = `Δ ${dSign}${dAlt} ft`;
   $('rCurAltSub').textContent = (vMode === 'auto') ? 'auto-on-path' :
