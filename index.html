@@ -445,6 +445,50 @@
     }
     .cdi-wrap { max-height: none; }
   }
+
+  /* iPad portrait — stack vertically with a large centred CDI and a
+     wide 4-column readout grid that uses the tall screen well. */
+  @media (min-width: 700px) and (orientation: portrait) {
+    #setup {
+      padding: 32px 24px 36px;
+      max-width: 640px;
+    }
+    #setup h1 { font-size: 22px; }
+    .field label { font-size: 13px; }
+    .field input { font-size: 20px; padding: 14px 16px; min-height: 52px; }
+    .seg button { padding: 14px 8px; font-size: 14px; min-height: 52px; }
+    #goBtn { padding: 20px; font-size: 18px; min-height: 64px; }
+
+    #sim { padding: 14px 18px 18px; gap: 12px; }
+    .sim-main {
+      grid-template-columns: 1fr;
+    }
+    .cdi-wrap {
+      max-height: 58vh;
+      max-width: 68vh;
+      margin: 0 auto;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+    }
+    .readouts {
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 10px;
+    }
+    .readout { min-height: 64px; padding: 10px 12px; }
+    .readout .val { font-size: 22px; }
+    .readout .lbl { font-size: 11px; }
+    .controls button, .nudge button {
+      min-height: 56px;
+      font-size: 14px;
+    }
+    .sim-top {
+      padding: 10px 16px;
+      font-size: 14px;
+    }
+    .sim-top .mode-tag, .sim-top .course-tag .v {
+      font-size: 16px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -701,6 +745,7 @@
    the setup screen and in the bottom-left of the CDI panel on
    the simulation screen, so a stale copy is obvious at a glance.
 
+     0.11.0 iPad portrait styling; documented unified source API; cdi-test.py suite
      0.10.2 Manual altitude is standalone — no longer fights the path's descent
      0.10.1 Manual source: FPM always integrates into altitude; vMode toggle hidden
      0.10.0 Manual location source — fully simulated position advances at manualGsKt
@@ -719,7 +764,7 @@
      0.2.0  ILS GS deflects before FAF; setup-screen version label
      0.1.x  Initial release; MSFS Bridge support added
 */
-const APP_VERSION = 'v0.10.2';
+const APP_VERSION = 'v0.11.0';
 // Inject the version into every .app-version element. The script lives at the
 // end of <body> so the elements are already parsed; we still guard with a
 // DOMContentLoaded fallback in case the script is ever moved.
@@ -1203,6 +1248,47 @@ function armCompass() {
   window.addEventListener('deviceorientation', onOrient, true);
 }
 armCompass();
+
+/* ============================================================
+   Position-source contract — single API for all three modes.
+   ============================================================
+   GPS, MSFS Bridge, and Manual all feed the SAME two callbacks
+   (defined inside beginSimulation):
+
+       onFirst(pos)   — once, when the first fix arrives. Sets
+                        Sim.lat0/lon0/course and starts the
+                        render loop via finalizeStartup().
+
+       onUpdate(pos)  — for every subsequent fix. Pushes onto
+                        Sim.smooth (lat/lon MA), Sim.altSmooth,
+                        Sim.altHistory, Sim.gsSmooth.
+
+   Each `pos` object has the same shape regardless of source:
+
+       {
+         coords: {
+           latitude:   <deg>,
+           longitude:  <deg>,
+           altitude:   <m MSL or null>,
+           accuracy:   <m>,
+           altitudeAccuracy: <m>,
+           heading:    <deg or null>,
+           speed:      <m/s or null>,
+         },
+         timestamp: <unix ms>
+       }
+
+   - GPS uses navigator.geolocation.watchPosition (native shape).
+   - Bridge translates the relay's JSON {lat, lon, alt_ft, hdg,
+     gs_kt} into the same shape (m/s for speed, m for altitude).
+   - Manual synthesises a fix every 200 ms by advancing along
+     the configured course at Sim.manualGsKt × dt.
+
+   Therefore the render() loop and ALL downstream display logic
+   (CDI needles, readouts, banners) are mode-agnostic — they
+   read only from the smoothed-fix buffers, which all three
+   sources populate identically.
+*/
 
 /* ----- core: begin simulation ----- */
 function beginSimulation(cfg) {
